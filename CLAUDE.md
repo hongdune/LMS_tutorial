@@ -102,8 +102,10 @@ OCI 인스턴스 (LMS 저장소)                   학생 PC: Windows + WSL (이
 # Python 환경 (최초 1회, Python 3.10 이상)
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
+# tests/test_frontend.py는 torch·numpy가 있어야 한다(필수 의존성이 아니라 [dev]에 없다)
+.venv/bin/pip install numpy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
 
-# 테스트
+# 테스트 (현재 53개)
 .venv/bin/pytest
 
 # 런타임 실행 (출력되는 URL/Token을 LMS에 등록)
@@ -204,4 +206,12 @@ python3 -m venv .venv
 ### 다음 작업 (WSL, 우선순위 순)
 1. **Colab 안내 범위 결정**: 끊김은 간헐적이고, 끊길 때 메시지 약 1개를 잃을 수 있다. 프론트 대책(LMS 95a346b)은 브라우저에서 확인했다. googlecolab 이슈 답변을 보고 베타로 열지 정한다
 2. **Colab 브라우저 확인**: https://lms.132-145-125-71.sslip.io/courses/transformer/1 과 `/runtime-test`에서 `lms-runtime --colab` URL/Token으로 확인한다
-3. **Colab 쪽 `lms_kernel` 설치 방식**: 계약 4장 "헬퍼 버전 확인"과 함께 LMS 세션과 정한다
+3. **Colab 쪽 `lms_kernel` 설치 방식**: 계약 4장 "헬퍼 버전 확인"과 함께 LMS 세션과 정한다. 지금은 Colab 커널에 `lms_kernel`이 없어서 프론트의 `info()`·`variables()` 호출이 `ModuleNotFoundError`로 끝난다
+
+개선 후보 (2026-11-03 정리, 우선순위 순. 계약을 건드리는 것은 LMS 세션과 먼저 합의한다)
+4. **테스트의 torch 의존 정리**: `tests/test_frontend.py`의 torch 있음 테스트는 torch가 없으면 실패한다. `pytest.importorskip("torch")`로 건너뛰게 하거나, `[test-torch]` 같은 별도 extra를 만든다. 지금은 위 "명령어"의 수동 설치로 해결한다
+5. **CI**: GitHub Actions가 없다. Ubuntu + Python 3.10/3.12, CPU torch로 `pytest`를 돌린다. Colab 실측은 CI 대상이 아니다(가짜 업스트림 테스트만)
+6. **Colab CLI 버전 확인**: README는 0.7.5로 고정해 설치하지만, `lms-runtime --colab`은 버전을 확인하지 않는다. 시작할 때 `colab version`(또는 venv의 `importlib.metadata`)을 읽어 0.7.5가 아니면 경고만 출력한다. `sessions.json` 형식이 바뀌면 브리지가 조용히 503을 내므로, 읽기 실패 시 안내 문구도 넣는다
+7. **`--debug-drop-reply-once`와 `info()`**: 지금은 프론트가 접속 직후 부르는 `info()`(silent 실행)의 응답이 버려진다. silent 요청은 건너뛰고 학생의 첫 셀을 버리도록 바꿀지 정한다. 진단 옵션이라 계약은 바뀌지 않지만, 브라우저 확인 절차(LMS 95a346b)가 지금 동작에 맞춰져 있으면 LMS 세션에 알린다
+8. **googlecolab 이슈 후속**: 사용자가 제출한 두 이슈(로그의 자격증명, 서드파티 장시간 WS)의 URL을 3장에 적고, 답변에 따라 colab.log 경고와 WS 끊김 대책을 갱신한다
+9. **계약 4장 테스트 결과 보고 형식**: 계약에 **결정 대기**로 남아 있다. LMS 세션이 정하기 전에는 구현하지 않는다
