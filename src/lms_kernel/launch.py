@@ -24,7 +24,7 @@ DEBUG_DROP_REPLY_NOTICE = (
 
 def build_command(origin: str, port: int, token: str, debug_drop_reply_once: bool = False) -> list[str]:
     cmd = [
-        sys.executable, "-m", "jupyter_server",
+        sys.executable, "-m", "lms_kernel.server",
         "--no-browser",
         f"--port={port}",
         "--ServerApp.ip=127.0.0.1",

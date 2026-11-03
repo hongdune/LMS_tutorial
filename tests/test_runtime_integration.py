@@ -144,3 +144,17 @@ def test_websocket_rejects_foreign_origin(runtime):
             )
     finally:
         requests.delete(f"{base}/api/kernels/{kernel_id}", headers=_auth(), timeout=10)
+
+
+def test_error_responses_keep_cors_header(runtime):
+    """Errors must carry ACAO too, or the browser only sees a CORS failure and the LMS
+    cannot tell "kernel gone (404)" from "runtime unreachable" (lms_kernel/server.py)."""
+    base, _ = runtime
+    missing = requests.get(f"{base}/api/kernels/00000000-0000-0000-0000-000000000000",
+                           headers={**_auth(), "Origin": ORIGIN}, timeout=5)
+    assert missing.status_code == 404
+    assert missing.headers.get("Access-Control-Allow-Origin") == ORIGIN
+    bad = requests.get(f"{base}/api/kernels",
+                       headers={"Authorization": "token wrong", "Origin": ORIGIN}, timeout=5)
+    assert bad.status_code == 403
+    assert bad.headers.get("Access-Control-Allow-Origin") == ORIGIN
