@@ -29,6 +29,7 @@ from urllib.parse import urlencode, urlsplit
 from tornado import httpclient, web, websocket
 
 from .colab_session import ColabSession, SessionGone
+from .debug import ReplyDropper
 
 log = logging.getLogger("lms_kernel.bridge")
 
@@ -79,22 +80,26 @@ def _strip_token(query_arguments: dict) -> list[tuple[str, str]]:
     ]
 
 
-def is_colab_only_message(msg) -> bool:
-    """True for Colab-specific kernel messages (msg_type ``colab_*``) the LMS does not handle."""
+def parse_frame(msg) -> Optional[dict]:
+    """The Jupyter message in a legacy-protocol frame (JSON text or binary), or None."""
     try:
         if isinstance(msg, bytes):
-            if b"colab_" not in msg:
-                return False
             # Legacy Jupyter binary frame: uint32 nbufs, nbufs uint32 offsets, JSON msg, buffers.
             (nbufs,) = struct.unpack_from("!I", msg, 0)
             offsets = struct.unpack_from(f"!{nbufs}I", msg, 4)
             end = offsets[1] if nbufs > 1 else len(msg)
-            data = json.loads(msg[offsets[0]:end])
-        else:
-            if "colab_" not in msg:
-                return False
-            data = json.loads(msg)
+            return json.loads(msg[offsets[0]:end])
+        return json.loads(msg)
     except Exception:
+        return None
+
+
+def is_colab_only_message(msg) -> bool:
+    """True for Colab-specific kernel messages (msg_type ``colab_*``) the LMS does not handle."""
+    if (b"colab_" if isinstance(msg, bytes) else "colab_") not in msg:
+        return False
+    data = parse_frame(msg)
+    if not isinstance(data, dict):
         return False
     msg_type = data.get("msg_type") or data.get("header", {}).get("msg_type") or ""
     return msg_type.startswith("colab_")
@@ -385,6 +390,11 @@ class ChannelsHandler(_Auth, websocket.WebSocketHandler):
                         break
                     if is_colab_only_message(msg):
                         continue
+                    dropper = self._settings().get("reply_dropper")
+                    if dropper is not None:
+                        data = parse_frame(msg)
+                        if isinstance(data, dict) and dropper.should_drop(self._kernel_id, data):
+                            continue
                     try:
                         await self.write_message(msg, binary=isinstance(msg, bytes))
                     except websocket.WebSocketClosedError:
@@ -443,6 +453,7 @@ def make_app(
     colab_session: ColabSession,
     upstream_reconnect: bool = True,
     debug_drop_upstream_after: Optional[float] = None,
+    debug_drop_reply_once: bool = False,
 ) -> web.Application:
     kernel = rf"/api/kernels/(?:{ID})"
     return web.Application(
@@ -458,6 +469,7 @@ def make_app(
         colab_session=colab_session,
         upstream_reconnect=upstream_reconnect,
         debug_drop_upstream_after=debug_drop_upstream_after,
+        reply_dropper=ReplyDropper() if debug_drop_reply_once else None,
         log_function=_log_request,
         websocket_max_message_size=MAX_MESSAGE_SIZE,
         websocket_ping_interval=None,
@@ -471,9 +483,13 @@ def start(
     colab_session: ColabSession,
     upstream_reconnect: bool = True,
     debug_drop_upstream_after: Optional[float] = None,
+    debug_drop_reply_once: bool = False,
 ):
     """Bind 127.0.0.1:<port> (raises OSError if taken). Call inside a running event loop."""
-    app = make_app(origin, token, colab_session, upstream_reconnect, debug_drop_upstream_after)
+    app = make_app(
+        origin, token, colab_session, upstream_reconnect, debug_drop_upstream_after,
+        debug_drop_reply_once,
+    )
     return app.listen(port, address="127.0.0.1")
 
 

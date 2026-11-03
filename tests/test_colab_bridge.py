@@ -89,7 +89,7 @@ class Bridge:
     """Runs the bridge on its own event loop thread, like `lms-runtime --colab` does."""
 
     def __init__(self, sessions_path: Path, min_refresh_interval=0.0, upstream_reconnect=True,
-                 debug_drop_upstream_after=None):
+                 debug_drop_upstream_after=None, debug_drop_reply_once=False):
         self.sessions_path = sessions_path
         self.session = ColabSession(
             SESSION, sessions_path=str(sessions_path), colab_cmd=FAKE_CLI,
@@ -108,6 +108,7 @@ class Bridge:
                 self.server = start(
                     ORIGIN, self.port, LMS_TOKEN, self.session, upstream_reconnect=upstream_reconnect,
                     debug_drop_upstream_after=debug_drop_upstream_after,
+                    debug_drop_reply_once=debug_drop_reply_once,
                 )
 
             self.loop.run_until_complete(setup())
@@ -691,3 +692,12 @@ def test_warns_about_readable_colab_config_dir(tmp_path, upstream):
     assert loose_config_dir(str(path)) is None
     out = subprocess.run(exe, capture_output=True, text=True, timeout=60)
     assert "chmod 700" not in out.stderr
+
+
+
+def test_bridge_drops_first_reply_once(make_bridge, upstream):
+    from test_debug_drop_reply import check_first_reply_dropped
+
+    b = make_bridge(_session_entry(upstream, PROXY_TOKEN), debug_drop_reply_once=True)
+    b.call(b.session.refresh())
+    check_first_reply_dropped(b.base, b.ws_base, _auth(), {"origin": ORIGIN}, token=LMS_TOKEN)

@@ -17,10 +17,13 @@ import subprocess
 import sys
 
 DEFAULT_ORIGIN = "http://localhost:3000"
+DEBUG_DROP_REPLY_NOTICE = (
+    "[진단] --debug-drop-reply-once: 커널마다 첫 실행의 응답(execute_reply, idle)을 브라우저로 보내지 않습니다."
+)
 
 
-def build_command(origin: str, port: int, token: str) -> list[str]:
-    return [
+def build_command(origin: str, port: int, token: str, debug_drop_reply_once: bool = False) -> list[str]:
+    cmd = [
         sys.executable, "-m", "jupyter_server",
         "--no-browser",
         f"--port={port}",
@@ -29,6 +32,11 @@ def build_command(origin: str, port: int, token: str) -> list[str]:
         f"--IdentityProvider.token={token}",
         "--ServerApp.identity_provider_class=lms_kernel.auth.StrictOriginIdentityProvider",
     ]
+    if debug_drop_reply_once:
+        cmd.append(
+            "--ServerApp.kernel_websocket_connection_class=lms_kernel.debug.DropReplyOnceConnection"
+        )
+    return cmd
 
 
 def print_registration(port: int, token: str) -> None:
@@ -84,11 +92,14 @@ def run_colab_bridge(args, token: str) -> int:
                 args.origin, args.port, token, session,
                 upstream_reconnect=not args.no_upstream_reconnect,
                 debug_drop_upstream_after=args.debug_drop_upstream_after,
+                debug_drop_reply_once=args.debug_drop_reply_once,
             )
         except OSError as e:
             print(f"포트 {args.port}를 열 수 없습니다: {e.strerror}", file=sys.stderr)
             return 1
         print(f"Colab 런타임에 연결했습니다 (세션 '{args.colab}', {hw}).", flush=True)
+        if args.debug_drop_reply_once:
+            print(DEBUG_DROP_REPLY_NOTICE, flush=True)
         print_registration(args.port, token)
         print("종료하려면 Ctrl+C를 누르세요. Colab 런타임은 `colab stop`으로 따로 종료합니다.", flush=True)
         try:
@@ -133,6 +144,11 @@ def main() -> None:
         default=None,
         help=argparse.SUPPRESS,  # diagnostics: close each Colab-side WebSocket once after N s
     )
+    parser.add_argument(
+        "--debug-drop-reply-once",
+        action="store_true",
+        help=argparse.SUPPRESS,  # diagnostics: per kernel, hide the first execute_reply + its idle
+    )
     args = parser.parse_args()
 
     token = secrets.token_urlsafe(32)
@@ -140,7 +156,12 @@ def main() -> None:
         sys.exit(run_colab_bridge(args, token))
 
     print_registration(args.port, token)
-    subprocess.run(build_command(args.origin, args.port, token), check=False)
+    if args.debug_drop_reply_once:
+        print(DEBUG_DROP_REPLY_NOTICE, flush=True)
+    subprocess.run(
+        build_command(args.origin, args.port, token, debug_drop_reply_once=args.debug_drop_reply_once),
+        check=False,
+    )
 
 
 if __name__ == "__main__":

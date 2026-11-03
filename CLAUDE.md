@@ -80,7 +80,7 @@ OCI 인스턴스 (LMS 저장소)                   학생 PC: Windows + WSL (이
 - **WS 끊김 (미해결, 완화됨)**: 실행 도중 프록시가 WS를 끊는 현상이 있다. 2026-11-03 오전에는 `import torch` 실행 중에 자주 재현됐지만, 같은 날 오후에는 자연 끊김이 24회 중 0회였다. 간헐적이고 원인은 모른다. 같은 코드를 `colab exec`로 실행하면 정상이고, 남은 차이는 CLI의 클라이언트 식별 헤더뿐이다. 이 헤더는 흉내 내지 않는다(googlecolab에 문의할 예정).
   - 복구: Colab의 jupyter-server는 같은 `session_id`로 다시 붙으면, 끊긴 동안 쌓인 메시지를 재전송한다(강제 끊김 실측: 0.3초 안에 재전송).
   - **한계**: 끊기는 순간 주변의 메시지 약 1개는 재전송되지 않고 사라진다(강제 끊김 15회 중 6회, 5초 뒤 재연결하면 3회 모두). 프록시 쪽 옛 연결로 이미 나간 메시지로 보인다. 사라진 것이 `execute_reply`나 마지막 `status: idle`이면 프론트는 실행이 끝나지 않은 것처럼 보인다.
-  - 브리지 기본값은 B: 업스트림만 같은 `session_id`로 다시 연결한다(약 0.5초, 브라우저 WS 유지). 재시도 간격은 0, 1, 2, 4초이고, 모두 실패하거나 커널이 404면 브라우저 WS를 1011로 닫는다. 진단용 숨김 옵션은 `--no-upstream-reconnect`와 `--debug-drop-upstream-after <초>`다.
+  - 브리지 기본값은 B: 업스트림만 같은 `session_id`로 다시 연결한다(약 0.5초, 브라우저 WS 유지). 재시도 간격은 0, 1, 2, 4초이고, 모두 실패하거나 커널이 404면 브라우저 WS를 1011로 닫는다. 진단용 숨김 옵션은 `--no-upstream-reconnect`와 `--debug-drop-upstream-after <초>`다. `--debug-drop-reply-once`는 local 모드에서도 쓸 수 있고, 커널마다 첫 실행의 `execute_reply`와 그 실행의 `status: idle`을 브라우저로 보내지 않는다(응답 누락 재현용).
 
 위험:
 - "notebook UI 우회"·"원격 제어" 제한은 **컴퓨트 유닛 잔액이 0보다 클 때만** 풀린다. Pro+라도 월 할당량을 다 쓰면 제한 대상이 되고, 런타임이 예고 없이 종료될 수 있다.
@@ -158,9 +158,18 @@ python3 -m venv .venv
   - googlecolab/google-colab-cli 이슈 초안 2개(로그의 자격증명, 서드파티 장시간 WS 문의)를 사용자에게 넘겼다. 제출은 사용자가 한다
   - 테스트: 끊었다 다시 붙는 TCP 중계로 A/B 무손실 확인, 재연결 실패 시 1011 확인, 진단 옵션, 권한 경고 (총 29개)
 
+- 2026-11-03 (WSL) 응답 누락 재현 옵션
+  - LMS 프론트에 응답 누락 대책이 들어갔다(LMS 95a346b): 셀이 응답을 기다리는 동안 5초마다 `GET /api/kernels/{id}`를 보고, 연속 두 번 idle이면 "결과 일부 누락"으로 끝낸다. 계약은 바뀌지 않았다
+  - `--debug-drop-reply-once` 추가 (`lms_kernel/debug.py`)
+    - local 모드: Jupyter Server의 `kernel_websocket_connection_class`를 바꾼다
+    - Colab 모드: 브리지에서 메시지를 걸러 낸다
+    - 버리는 기준은 메시지 순서가 아니라 부모 `msg_id`다
+  - 테스트 `tests/test_debug_drop_reply.py`, bridge·launch 테스트
+  - colab-bridge 브랜치를 main에 병합
+
 ### 다음 작업 (WSL, 우선순위 순)
-1. **Colab 안내 범위 결정**: 끊김은 간헐적이고, 끊길 때 메시지 약 1개를 잃을 수 있다. 프론트 대책(아래 2번)이 들어가기 전에는 Colab을 정식 안내하지 않는다. googlecolab 이슈 답변도 반영한다
-2. **프론트 대책 (LMS 세션)**: 다시 연결한 뒤 실행 중인 요청이 있으면 `GET /api/kernels/{id}`의 `execution_state`로 커널 상태를 확인한다. idle인데 응답이 오지 않았으면 실행을 끝난 것으로 처리하고 "출력 일부가 빠졌을 수 있음"을 표시한다. 계약에 넣을지 함께 정한다
+1. **응답 누락 대책 브라우저 확인**: local + `--debug-drop-reply-once`로 코스 페이지에서 첫 셀이 "결과 일부 누락"으로 끝나는지 확인한다(사용자)
+2. **Colab 안내 범위 결정**: 끊김은 간헐적이고, 끊길 때 메시지 약 1개를 잃을 수 있다. 프론트 대책은 들어갔다(LMS 95a346b). 브라우저 확인과 googlecolab 이슈 답변을 보고 베타로 열지 정한다
 3. **Colab 브라우저 확인**: https://lms.132-145-125-71.sslip.io/courses/transformer/1 과 `/runtime-test`에서 `lms-runtime --colab` URL/Token으로 확인한다
 4. **Colab 쪽 `lms_kernel` 설치 방식**: 계약 4장 "헬퍼 버전 확인"과 함께 LMS 세션과 정한다
 5. **커널 헬퍼**: 환경 점검 → 변수 인스펙터 → `lms_viz` 순. 각각 결과 형식을 먼저 계약 문서에 정한다(LMS 세션과 합의)
