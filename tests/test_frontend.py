@@ -105,7 +105,7 @@ def test_helper_exception_comes_back_as_error(kernel):
 
 def test_info(kernel):
     data = _json(kernel.helper("info()")[0])
-    assert data == {"version": 1, "lms_kernel": "0.3.0", "contract": "0.3"}
+    assert data == {"version": 1, "lms_kernel": "0.3.0", "contract": "0.5"}
 
 
 def test_env_with_torch(kernel):
@@ -184,7 +184,7 @@ def test_variables_schema_and_exclusions(populated):
     names = list(v)
     assert names == sorted(names)
     for excluded in ("torch", "np", "nn", "collections", "In", "Out", "exit", "quit",
-                     "get_ipython", "_hidden"):
+                     "get_ipython", "open", "_hidden"):
         assert excluded not in v
     assert all(len(x["summary"]) <= 120 for x in v.values())
 
@@ -337,3 +337,19 @@ def test_viz_scatter(kernel):
     small = kernel.run("lms_viz.scatter([1, 2], [3, float('nan')], label=['p', 'q'])")[1]
     d2 = _displays(small)[0]["data"]["application/vnd.lms.scatter+json"]
     assert d2 == {"version": 1, "x": [1, 2], "y": [3, None], "label": ["p", "q"]}
+
+
+def test_variables_shows_injected_name_once_student_overwrites_it():
+    """Contract 4.4 (v0.4): user_ns_hidden names are excluded only while they are still the
+    same object (IPython %who rule)."""
+    k = Kernel()
+    try:
+        names = lambda: [v["name"] for v in _json(k.helper("variables()")[0])["variables"]]
+        assert names() == []  # fresh kernel: In, Out, exit, quit, get_ipython, open all hidden
+        k.run("open = 1\nquit = 'q'")
+        v = {x["name"]: x for x in _json(k.helper("variables()")[0])["variables"]}
+        assert v["open"] == {"name": "open", "type": "int", "summary": "1"}
+        assert v["quit"]["summary"] == "'q'"
+        assert "exit" not in v and "In" not in v
+    finally:
+        k.stop()

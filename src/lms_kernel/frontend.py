@@ -28,7 +28,7 @@ from typing import Any, Optional
 
 from . import __version__
 
-CONTRACT_VERSION = "0.3"
+CONTRACT_VERSION = "0.5"
 SCHEMA_VERSION = 1
 
 MAX_VARIABLES = 200
@@ -36,8 +36,6 @@ MAX_SUMMARY = 120
 TREE_MAX_DEPTH = 6
 TREE_MAX_CHILDREN = 100
 
-# Names IPython puts into the user namespace (contract 4.4).
-IPYTHON_NAMES = frozenset({"In", "Out", "exit", "quit", "get_ipython"})
 # Exact types whose repr is cheap and ours (not the student's) to call.
 REPR_TYPES = (bool, int, float, complex, str, type(None))
 CONTAINER_TYPES = (list, tuple, dict, set, frozenset, collections.deque)
@@ -120,16 +118,34 @@ def env(requirements=()) -> Result:
 
 # --- 4.4 variables / module_tree --------------------------------------------------------
 
-def _user_ns() -> dict:
+def _shell():
     try:
         from IPython import get_ipython
 
-        shell = get_ipython()
+        return get_ipython()
     except Exception:
-        shell = None
+        return None
+
+
+def _user_ns() -> dict:
+    shell = _shell()
     if shell is not None:
         return shell.user_ns
     return sys.modules["__main__"].__dict__
+
+
+def _hidden_ns() -> dict:
+    """Names IPython/ipykernel put into user_ns (In, Out, exit, quit, get_ipython, open, ...)."""
+    shell = _shell()
+    return getattr(shell, "user_ns_hidden", None) or {}
+
+
+_MISSING = object()
+
+
+def _injected(name: str, value, hidden: dict) -> bool:
+    # Same rule as IPython's %who: hidden only while it is still the very same object.
+    return hidden.get(name, _MISSING) is value
 
 
 def _type_name(cls: type) -> str:
@@ -211,11 +227,12 @@ def _describe(name: str, value: Any) -> dict:
 
 def variables() -> Result:
     ns = _user_ns()
+    hidden = _hidden_ns()
     names = sorted(
         n for n, v in list(ns.items())
         if isinstance(n, str)
         and not n.startswith("_")
-        and n not in IPYTHON_NAMES
+        and not _injected(n, v, hidden)
         and not issubclass(type(v), types.ModuleType)
     )
     truncated = len(names) > MAX_VARIABLES

@@ -1,6 +1,6 @@
 # LMS ↔ 학생 런타임 인터페이스 계약
 
-- 버전: **0.3** (2026-11-03)
+- 버전: **0.5** (2026-11-03)
 - 원본: `hongdune/LMS`의 `docs/runtime-contract.md`. `hongdune/LMS_tutorial`에는 같은 내용의 사본을 둔다.
 - 변경 절차: 내용을 바꾸면 버전을 올리고 아래 변경 기록에 한 줄을 남긴 뒤, 두 저장소의 파일을 **같은 내용으로** 갱신한다. 한쪽만 바뀐 상태로 커밋하지 않는다.
 - "결정 대기"로 표시한 항목은 한쪽에서 임의로 정하지 않는다. 정할 때는 이 문서부터 고친다.
@@ -72,7 +72,7 @@
 ### 4.2 헬퍼 버전 확인 — `info()`
 
 ```json
-{"version": 1, "lms_kernel": "0.3.0", "contract": "0.3"}
+{"version": 1, "lms_kernel": "0.3.0", "contract": "0.5"}
 ```
 
 - 프론트는 커널에 붙은 직후 한 번 부른다. `contract`가 프론트가 아는 계약 버전과 다르면 런타임 업데이트를 안내한다(실행은 막지 않는다).
@@ -99,8 +99,8 @@
 }
 ```
 
-- `packages`: 요구사항마다 하나. 설치 버전은 배포판 메타데이터(`importlib.metadata`)로 읽고 버전 비교는 PEP 440(`packaging`)을 따른다. 요구사항 문자열을 해석할 수 없으면 `ok: false`와 `"error": "<이유>"`를 넣는다.
-- `torch`: torch가 설치돼 있지 않으면 `null`. 설치돼 있으면 import해서 채운다(몇 초 걸릴 수 있다). CUDA가 없으면 `cuda.available: false`, `version: null`, `devices: []`. 메모리 단위는 바이트.
+- `packages`: 요구사항마다 하나. 설치 버전은 배포판 메타데이터(`importlib.metadata`)로 읽고 버전 비교는 PEP 440(`packaging`)을 따른다. 요구사항 문자열을 해석할 수 없으면 `name: null`, `installed: null`, `ok: false`와 `"error": "<이유>"`를 넣는다.
+- `torch`: torch가 설치돼 있지 않으면 `null`. 설치돼 있으면 import해서 채운다(몇 초 걸릴 수 있다). 설치돼 있지만 import가 실패하면 `version`, `cuda.available: false`, `mps: false`와 `"error": "<이유>"`를 넣는다. CUDA가 없으면 `cuda.available: false`, `version: null`, `devices: []`. 메모리 단위는 바이트.
 - 설치 명령 안내는 프론트가 결과를 보고 만든다(헬퍼는 명령을 만들지 않는다).
 
 ### 4.4 변수 인스펙터 (2.9) — `variables()`, `module_tree(name)`
@@ -121,11 +121,11 @@
 }
 ```
 
-- 대상: IPython 사용자 네임스페이스에서 `_`로 시작하는 이름, 모듈 객체, IPython이 넣는 이름(`In`, `Out`, `exit`, `quit`, `get_ipython`)을 뺀 나머지. 이름순으로 최대 200개, 넘으면 `truncated: true`.
+- 대상: IPython 사용자 네임스페이스(`user_ns`)에서 `_`로 시작하는 이름, 모듈 객체, IPython·ipykernel이 넣은 이름을 뺀 나머지. 넣은 이름은 IPython `%who`와 같은 규칙으로 판별한다: `user_ns_hidden`에 같은 이름이 있고 값이 **같은 객체**면 제외(`In`, `Out`, `exit`, `quit`, `get_ipython`, ipykernel의 `open` 등). 학생이 같은 이름에 새 값을 넣었으면 포함한다. 이름순으로 최대 200개, 넘으면 `truncated: true`.
 - 공통 필드: `name`, `type`(모듈 경로를 포함한 클래스 이름), `summary`(한 줄, 최대 120자).
-- `torch.Tensor`·`numpy.ndarray`: `shape`, `dtype`, `device`(ndarray는 `"cpu"`), `nbytes`.
+- `torch.Tensor`·`numpy.ndarray`: `shape`, `dtype`, `device`(ndarray는 `"cpu"`), `nbytes`. `dtype`은 각 라이브러리의 표기를 그대로 쓴다(torch `"torch.float32"`, numpy `"float32"`).
 - `torch.nn.Module`: `params`(전체 파라미터 수), `trainable`(`requires_grad`인 파라미터 수).
-- 그 밖의 타입은 공통 필드만. `summary`는 숫자·짧은 문자열·bool·None이면 `repr`, 컨테이너면 `list[3]`처럼 길이만, 그 밖에는 클래스 이름.
+- 그 밖의 타입은 공통 필드만. `summary`는 숫자·bool·None·120자 이하 문자열이면 `repr`, 긴 문자열·컨테이너면 `str[500]`·`list[3]`처럼 길이만, 그 밖에는 클래스 이름. 4,300자리를 넘는 int는 `int`(파이썬이 repr을 거부한다). 학생이 정의한 함수·클래스도 포함한다(`type: "function"` 등).
 
 `module_tree(name)`: 이름이 가리키는 `nn.Module`의 하위 모듈 트리.
 
@@ -136,14 +136,14 @@
  ], "truncated": false}
 ```
 
-- 깊이 최대 6, 노드당 자식 최대 100개. 넘으면 그 노드에 `truncated: true`.
+- 깊이 최대 6, 노드당 자식 최대 100개. 루트에는 `truncated`를 항상 넣고, 하위 노드에는 잘렸을 때만 `truncated: true`를 넣는다.
 - 이름이 없거나 `nn.Module`이 아니면 `KeyError`/`TypeError`를 낸다(4.1의 오류 형식).
 
 ### 4.5 시각화 위젯 (2.11) — `lms_viz`
 
 - 커널 → 프론트 전달은 `display_data`의 커스텀 MIME `application/vnd.lms.<widget>+json`이다. 번들에는 항상 `text/plain` 대체 표현을 함께 넣어 Jupyter·Colab에서도 무언가 보이게 한다.
 - 실시간 갱신(학습 곡선)은 Jupyter 표준 `display_id` + `update_display_data`를 쓴다. 갱신 메시지는 **전체 데이터**를 다시 보낸다(부분 추가 없음). 프론트는 같은 `display_id`의 출력을 교체한다.
-- 크기 제한은 헬퍼가 지킨다(넘으면 다운샘플링하거나 잘라 내고 `"truncated": true`).
+- 크기 제한은 헬퍼가 지킨다. 넘으면 heatmap은 앞쪽 256×256만 남기고(라벨과 칸을 맞추기 위해), line·scatter는 첫 점과 끝 점을 포함해 고르게 줄인 뒤 `"truncated": true`를 넣는다. 제한 안이면 이 필드는 없다.
 - 공통 선택 필드: `title`, `x_title`, `y_title`.
 
 | MIME | 필드 | 제한 |
@@ -163,4 +163,6 @@
 
 - 0.1 (2026-11-03): 저장소 분리와 함께 최초 작성.
 - 0.2 (2026-11-03): WebSocket 서브프로토콜 미선택 허용과 `session_id` 전달(2장), Colab 브리지 오류 형식과 종료 감지 지연(3장).
+- 0.5 (2026-11-03): LMS_tutorial 구현(d202e0c)에서 정한 세부 사항 반영 — `env`의 해석 불가 요구사항(`name: null`)과 torch import 실패(`torch.error`), 인스펙터 `dtype` 표기·`summary` 규칙·함수 포함, `module_tree` 루트 `truncated`, `lms_viz` 축소 방식.
+- 0.4 (2026-11-03): 인스펙터 제외 규칙을 `user_ns_hidden` 기준으로 변경(ipykernel이 넣는 `open`이 변수로 잡히던 문제). 4.1 호출 방식은 실제 ipykernel로 검증함.
 - 0.3 (2026-11-03): 커널 안 헬퍼 확정(4장) — `user_expressions` 호출 방식, `info`·`env`·`variables`·`module_tree` 결과 스키마, `lms_viz` 위젯 3종(heatmap·line·scatter)의 MIME과 스키마, 실시간 갱신은 `update_display_data`.

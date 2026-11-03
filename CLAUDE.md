@@ -190,10 +190,15 @@ python3 -m venv .venv
     - 제한을 넘으면 heatmap은 잘라 내고, line·scatter는 첫 점과 끝 점을 넣어 고르게 다운샘플링한다
   - `--debug-drop-reply-once`를 `--help`에 보이게 하고, 프론트의 `info()` 호출이 대신 버려진다는 점을 적었다
   - 테스트 `tests/test_frontend.py`: 실제 ipykernel에 계약 4.1 형식으로 호출한다(torch 있음 / `sys.modules['torch']=None`으로 없음)
-  - 계약 제안(미반영): ipykernel이 넣는 `open`이 `variables()`에 나온다. 제외 목록을 "`user_ns_hidden`에 있고 값이 그대로인 이름"(IPython `%who`와 같은 규칙)으로 바꾸자고 LMS 세션에 제안했다
+  - 계약 제안: ipykernel이 넣는 `open`이 `variables()`에 나온다. 제외 목록을 "`user_ns_hidden`에 있고 값이 그대로인 이름"(IPython `%who`와 같은 규칙)으로 바꾸자고 LMS 세션에 제안했다. v0.4에 반영됐다
+- 2026-11-03 (WSL) 계약 v0.5
+  - `docs/runtime-contract.md`를 v0.5(LMS b922d9e)로 갱신하고 `diff`로 원본과 같은지 확인했다
+  - `variables()` 제외 규칙을 `user_ns_hidden` 방식(v0.4)으로 바꿨다. 새 커널에서 `open`이 빠지고, 학생이 `open = 1`로 덮어쓰면 다시 보이는 것을 테스트했다
+  - `info()`의 `contract`를 `"0.5"`로 올렸다
+  - 구현과 계약이 다른 점(고치지 않고 LMS 세션에 알림): 계약은 4,300자리를 넘는 int만 `int`로 표시하는데, 구현은 `bit_length() > 400`(약 120자리)부터 `int`로 표시한다
 
 ### 다음 작업 (WSL, 우선순위 순)
 1. **Colab 안내 범위 결정**: 끊김은 간헐적이고, 끊길 때 메시지 약 1개를 잃을 수 있다. 프론트 대책(LMS 95a346b)은 브라우저에서 확인했다. googlecolab 이슈 답변을 보고 베타로 열지 정한다
 2. **Colab 브라우저 확인**: https://lms.132-145-125-71.sslip.io/courses/transformer/1 과 `/runtime-test`에서 `lms-runtime --colab` URL/Token으로 확인한다
 3. **Colab 쪽 `lms_kernel` 설치 방식**: 계약 4장 "헬퍼 버전 확인"과 함께 LMS 세션과 정한다
-4. **`variables()`의 `open` 제외**: 계약 4.4 제외 규칙 변경을 LMS 세션이 결정하면 반영한다
+4. **큰 int summary 기준**: 계약(4,300자리 초과)과 구현(약 120자리 초과)이 다르다. LMS 세션이 어느 쪽에 맞출지 정하면 반영한다
