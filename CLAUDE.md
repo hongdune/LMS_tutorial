@@ -53,11 +53,11 @@ OCI 인스턴스 (LMS 저장소)                   학생 PC: Windows + WSL (이
    - REST 인증: `X-Colab-Runtime-Proxy-Token` 헤더
    - WebSocket 인증: `colab-runtime-proxy-token` 쿼리 파라미터
    - 참고 소스: `src/colab_cli/client.py`, `runtime.py`, `state.py`
-3. `lms-runtime --colab <session>`(구현 예정)이 `127.0.0.1`에 로컬 브리지를 연다. 브리지는 LMS 토큰과 origin을 검사한 뒤 Jupyter REST/WS를 Colab 프록시 URL로 중계하면서 프록시 토큰을 붙인다.
+3. `lms-runtime --colab <session>`이 `127.0.0.1`에 로컬 브리지를 연다. 브리지는 LMS 토큰과 origin을 검사한 뒤 Jupyter REST/WS를 Colab 프록시 URL로 중계하면서 프록시 토큰을 붙인다.
 4. 브라우저 입장에서는 `local` 런타임과 똑같이 "URL + 토큰"이다.
 
 설계 근거:
-- 브리지를 두는 이유: Colab 프록시가 LMS origin에 CORS를 허용하지 않을 것으로 보여, 브라우저가 직접 REST를 호출할 수 없다. **실측이 필요하다.**
+- 브리지를 두는 이유: 브라우저는 Colab 프록시에 직접 붙을 수 없다. 2026-11-03에 실측했다. 프록시는 `ACAO: *`를 붙이지만 `Origin` 헤더가 있는 요청과 preflight를 404로 거부한다. 프록시 토큰을 브라우저에 노출하지 않고 LMS 토큰과 origin을 검사해야 하므로 브리지는 어차피 필요하다.
 - 약관 측면: Colab VM 안에 터널을 띄우지 않으므로 Colab FAQ의 "connecting to remote proxies"(유료 포함 전 런타임 금지) 조항과 충돌하지 않는다. 접속도 Google 공식 클라이언트 경로를 따른다.
 
 구현 규칙:
@@ -66,6 +66,21 @@ OCI 인스턴스 (LMS 저장소)                   학생 PC: Windows + WSL (이
 - 프록시 토큰에는 만료 시간이 있으므로 브리지가 갱신을 처리해야 한다.
 - Colab 전용 메시지(`colab_request`, 예: Drive 인증 요청)는 1단계에서 무시한다.
 - README 기준으로 CLI는 Linux/macOS만 지원한다. Windows 학생은 WSL이 필요하다.
+- 공식 클라이언트를 사칭하는 헤더(`X-Colab-Client-Agent: colab-cli` 등)를 보내지 않는다. 프록시는 이 헤더 없이도 REST·WS에 응답한다.
+
+### Colab CLI 실측 (google-colab-cli **0.7.5**, 2026-11-03, T4)
+- 설치: Python **3.12 이상**이 필요하다. 커널 환경과 섞지 않도록 별도 venv(`~/.colab-cli`)에 설치하고 `~/.local/bin/colab`으로 링크한다. Ubuntu 24.04 시스템 python3.12에는 `venv` 모듈이 없을 수 있다(`python3.12-venv`가 필요하며, 이 PC에서는 anaconda 3.13을 썼다).
+- 로그인: 처음 `colab` 명령을 실행할 때 CLI에 내장된 Google 클라이언트로 복사-붙여넣기 OAuth를 진행한다. 결과는 `~/.config/colab-cli/token.json`에 저장된다. README에는 기본값이 `adc`라고 적혀 있지만 코드 기본값은 `oauth2`다.
+- 세션 파일 `sessions.json`에는 이름마다 `url`(`https://8080-<endpoint>.<region>.prod.r.colab.dev`), `token`, `token_expires_at`, `accelerator`가 있다. **프록시 토큰 수명은 1시간**이다.
+- 갱신: CLI는 백그라운드에서 토큰을 갱신하지 않는다. 명령을 실행할 때 만료가 5분 안으로 남았거나 `status`/`sessions` 명령이면 `/tun/m/assignments`로 갱신한다. 서버에서 사라진 세션은 그때 파일에서 지운다. `colab stop`은 파일에서 바로 지운다.
+- 프록시는 **WebSocket ping에 응답하지 않는다.** ping을 켜면 약 25초 만에 끊기고, 끄면 70초 넘게 유지된다.
+- `colab stop` 직후에도 프록시는 약 85초 동안 REST에 200으로 응답한다. WS는 약 100초 뒤 닫힌다.
+- Colab 커널은 `colab_kernel_launcher`(jupyter-server 2.20)다. 커널 Python은 3.12, torch 2.11.0+cu130이다.
+- **CLI가 비밀값을 로그에 남긴다**: 명령마다 `~/.config/colab-cli/colab.log`(권한 0644)에 DEBUG 로그를 쓴다. 이 로그에 프록시 토큰, OAuth access token, **refresh token**이 들어간다. 실측에서 refresh token 2회를 확인했다. 끄는 옵션은 없다. `sessions.json`과 `token.json`도 0644다. 브리지는 CLI 호출을 토큰 만료 직전(약 1시간에 1회)과 장애 확인 때로 제한한다. 업스트림 이슈 제보 대상이다.
+- **WS 끊김 (미해결, 완화됨)**: 실행 도중 프록시가 WS를 끊는 현상이 있다. 2026-11-03 오전에는 `import torch` 실행 중에 자주 재현됐지만, 같은 날 오후에는 자연 끊김이 24회 중 0회였다. 간헐적이고 원인은 모른다. 같은 코드를 `colab exec`로 실행하면 정상이고, 남은 차이는 CLI의 클라이언트 식별 헤더뿐이다. 이 헤더는 흉내 내지 않는다(googlecolab에 문의할 예정).
+  - 복구: Colab의 jupyter-server는 같은 `session_id`로 다시 붙으면, 끊긴 동안 쌓인 메시지를 재전송한다(강제 끊김 실측: 0.3초 안에 재전송).
+  - **한계**: 끊기는 순간 주변의 메시지 약 1개는 재전송되지 않고 사라진다(강제 끊김 15회 중 6회, 5초 뒤 재연결하면 3회 모두). 프록시 쪽 옛 연결로 이미 나간 메시지로 보인다. 사라진 것이 `execute_reply`나 마지막 `status: idle`이면 프론트는 실행이 끝나지 않은 것처럼 보인다.
+  - 브리지 기본값은 B: 업스트림만 같은 `session_id`로 다시 연결한다(약 0.5초, 브라우저 WS 유지). 재시도 간격은 0, 1, 2, 4초이고, 모두 실패하거나 커널이 404면 브라우저 WS를 1011로 닫는다. 진단용 숨김 옵션은 `--no-upstream-reconnect`와 `--debug-drop-upstream-after <초>`다.
 
 위험:
 - "notebook UI 우회"·"원격 제어" 제한은 **컴퓨트 유닛 잔액이 0보다 클 때만** 풀린다. Pro+라도 월 할당량을 다 쓰면 제한 대상이 되고, 런타임이 예고 없이 종료될 수 있다.
@@ -112,18 +127,40 @@ python3 -m venv .venv
     - `Authorization: token ...` 헤더로 인증하면 XSRF 검사가 면제되므로 `disable_check_xsrf`는 쓰지 않는다
 - 2026-11-03 (WSL)
   - LMS 저장소의 `runtime/`을 git 기록과 함께 이 저장소로 분리. 패키지를 저장소 루트로 올림
-  - 인터페이스 계약 사본 `docs/runtime-contract.md` (v0.1)
+  - 인터페이스 계약 사본 `docs/runtime-contract.md` (v0.1, 이후 v0.2로 갱신)
   - 개발 환경: anaconda Python 3.13.9로 `.venv` 생성, jupyter_server 2.21.1, ipykernel 7.4.0
   - **보안 수정**: Jupyter Server는 토큰 인증된 요청의 Origin 검사를 건너뛰어 `allow_origin`이 CORS 헤더에만 적용되고 있었다(토큰만 알면 다른 사이트에서 WebSocket 연결 가능). `lms_kernel/auth.py`의 `StrictOriginIdentityProvider`로 토큰이 있어도 Origin을 검사하도록 바꿨다
   - 통합 테스트 `tests/test_runtime_integration.py`: 토큰 없음 403, CORS 헤더 고정, 다른 origin REST 404 / WS 거부, 커널 생성 → WS로 실행 → `stream`·`execute_result` 수신
   - WSL2 localhost 포워딩 확인: Windows PowerShell에서 `localhost:<port>`로 REST 200, WebSocket 연결 성공
 
+- 2026-11-03 (WSL) Colab 브리지
+  - local 런타임 브라우저 확인은 LMS 세션이 마쳤다(https://lms.132-145-125-71.sslip.io, Windows Chrome/Edge)
+  - Colab CLI 0.7.5 소스 검토와 실측 (결과는 3장 "Colab CLI 실측")
+  - `lms-runtime --colab <session>` 구현: `lms_kernel/bridge.py`(tornado, 의존성 추가 없음), `lms_kernel/colab_session.py`
+    - 계약 2장 경로만 중계하고 나머지는 404. 인증·origin·CORS·preflight는 local과 같다(다른 origin REST 404, WS 403)
+    - 프록시 토큰 주입: REST는 헤더, WS는 쿼리. 로그에는 경로만 남긴다(쿼리의 토큰 제외)
+    - 토큰 갱신: `sessions.json`을 15초마다 읽는다(CLI 호출 없음, `colab stop` 감지). 만료 5분 전, 또는 업스트림 401/403이면 `colab status -s`를 실행한다(30초 간격 제한)
+    - 종료·장애: 세션이 없으면 REST 503(한국어 `message`), 연결이 안 되면 502, WS는 1011로 닫는다. 프록시가 ping을 받지 않으므로 WS가 열려 있는 동안 30초마다 REST로 커널을 확인한다(2회 실패 또는 404면 닫음)
+    - WS는 서브프로토콜을 선택하지 않는다(기존 JSON 프로토콜). `colab_*` 메시지는 버린다
+  - 테스트 `tests/test_colab_bridge.py`: 가짜 업스트림(Colab 프록시 방식으로 인증하는 Jupyter Server, `tests/fake_colab_proxy.py`)과 가짜 CLI(`tests/fake_colab_cli.py`)
+  - 실측(T4): curl로 REST 403/200/404/preflight 204/커널 생성 201 확인. WS로 `print(1+1)`이 `2`를 반환함. `colab stop` 뒤 WS 1011, REST 503 확인
+
+- 2026-11-03 (WSL) 계약 v0.2, 끊김 복구 실험, 자격증명 경고
+  - `docs/runtime-contract.md`를 v0.2(LMS cbc9e32)로 갱신하고 `diff`로 원본과 같은지 확인했다
+  - 브리지는 `session_id`를 포함해 LMS 토큰을 뺀 쿼리를 모두 Colab 쪽으로 넘긴다
+  - 업스트림 재연결(B)을 기본값으로 정했다(3장 "WS 끊김")
+  - 실험(T4)
+    - 자연 끊김: A(브라우저가 재연결) 12회, B(브리지가 재연결) 12회, 9~60초짜리 실행. 끊김 0회, 출력 누락 0
+    - 강제 끊김(30초 실행, 10초에 끊음): C-A 9회, C-B 6회. 중복 0, `execute_reply` 15회 모두 도착
+    - 강제 끊김의 출력 누락: 15회 중 6회에서 끊는 순간의 1줄이 사라졌다
+    - 재연결 시간: B 0.4~0.5초, A 즉시 재연결 시 첫 메시지까지 0.3~1.3초
+  - `lms-runtime --colab`은 `~/.config/colab-cli` 권한이 느슨하면 `chmod 700` 경고를 출력한다(파일은 건드리지 않음). README 설치 단계에 같은 안내를 넣었다
+  - googlecolab/google-colab-cli 이슈 초안 2개(로그의 자격증명, 서드파티 장시간 WS 문의)를 사용자에게 넘겼다. 제출은 사용자가 한다
+  - 테스트: 끊었다 다시 붙는 TCP 중계로 A/B 무손실 확인, 재연결 실패 시 1011 확인, 진단 옵션, 권한 경고 (총 29개)
+
 ### 다음 작업 (WSL, 우선순위 순)
-1. **브라우저 최종 확인** (LMS 세션의 8장 2번과 함께 진행): OCI의 LMS 주소가 정해지면 `--origin`을 그 주소로 띄우고, Windows Chrome/Edge에서 LMS 페이지를 통해 REST·WebSocket이 되는지, Local Network Access 프롬프트가 어떻게 뜨는지 확인한다
-2. **Colab CLI 실측** (Pro+ 계정)
-   - `pip install google-colab-cli`로 설치한 뒤 `colab new --gpu T4`로 런타임 할당, `colab exec`로 동작 확인
-   - `sessions.json`에서 URL과 프록시 토큰을 얻을 수 있는지 확인. 토큰 만료 시간과 갱신 방식도 확인한다
-   - 프록시 URL에 대해 CORS 응답 확인. 브라우저가 직접 붙을 수 있는지에 따라 브리지가 필요한지 확정한다
-   - 사용한 CLI 버전을 3장에 기록
-3. **Colab 브리지 구현**: `lms-runtime --colab <session>`. REST/WS를 중계하고 토큰을 갱신한다. 통합 테스트도 함께 작성
-4. **커널 헬퍼**: 환경 점검 → 변수 인스펙터 → `lms_viz` 순. 각각 결과 형식을 먼저 계약 문서에 정한다(LMS 세션과 합의)
+1. **Colab 안내 범위 결정**: 끊김은 간헐적이고, 끊길 때 메시지 약 1개를 잃을 수 있다. 프론트 대책(아래 2번)이 들어가기 전에는 Colab을 정식 안내하지 않는다. googlecolab 이슈 답변도 반영한다
+2. **프론트 대책 (LMS 세션)**: 다시 연결한 뒤 실행 중인 요청이 있으면 `GET /api/kernels/{id}`의 `execution_state`로 커널 상태를 확인한다. idle인데 응답이 오지 않았으면 실행을 끝난 것으로 처리하고 "출력 일부가 빠졌을 수 있음"을 표시한다. 계약에 넣을지 함께 정한다
+3. **Colab 브라우저 확인**: https://lms.132-145-125-71.sslip.io/courses/transformer/1 과 `/runtime-test`에서 `lms-runtime --colab` URL/Token으로 확인한다
+4. **Colab 쪽 `lms_kernel` 설치 방식**: 계약 4장 "헬퍼 버전 확인"과 함께 LMS 세션과 정한다
+5. **커널 헬퍼**: 환경 점검 → 변수 인스펙터 → `lms_viz` 순. 각각 결과 형식을 먼저 계약 문서에 정한다(LMS 세션과 합의)

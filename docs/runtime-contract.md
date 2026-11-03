@@ -1,6 +1,6 @@
 # LMS ↔ 학생 런타임 인터페이스 계약
 
-- 버전: **0.1** (2026-11-03)
+- 버전: **0.2** (2026-11-03)
 - 원본: `hongdune/LMS`의 `docs/runtime-contract.md`. `hongdune/LMS_tutorial`에는 같은 내용의 사본을 둔다.
 - 변경 절차: 내용을 바꾸면 버전을 올리고 아래 변경 기록에 한 줄을 남긴 뒤, 두 저장소의 파일을 **같은 내용으로** 갱신한다. 한쪽만 바뀐 상태로 커밋하지 않는다.
 - "결정 대기"로 표시한 항목은 한쪽에서 임의로 정하지 않는다. 정할 때는 이 문서부터 고친다.
@@ -18,6 +18,8 @@
 - 학생 런타임은 **표준 Jupyter Server API**만 노출한다. 프론트는 아래 경로만 사용한다.
   - REST: `GET/POST /api/kernels`, `GET/DELETE /api/kernels/{id}`, `POST /api/kernels/{id}/interrupt`, `POST /api/kernels/{id}/restart`, `GET /api/kernelspecs`
   - WebSocket: `/api/kernels/{id}/channels` (Jupyter 메시지 프로토콜 v5)
+    - 런타임은 WebSocket 서브프로토콜(`v1.kernel.websocket.jupyter.org`)을 선택하지 않을 수 있다. 프론트는 서브프로토콜 없는 기존 JSON 방식도 지원해야 한다(`@jupyterlab/services`는 기본 지원).
+    - 프론트는 끊긴 WebSocket을 같은 `session_id` 쿼리로 다시 연결한다. 런타임(브리지 포함)은 `session_id`를 그대로 전달해, Jupyter Server가 끊긴 동안 쌓인 메시지를 재전송할 수 있게 한다.
 - 등록 정보는 **URL + 토큰** 두 값이다. `lms-runtime`이 시작할 때 터미널에 출력하고, 학생이 LMS 화면에 입력한다.
   - URL: `http://127.0.0.1:<port>` (기본 포트 8888). 학생 PC 기준이며, WSL에서는 Windows 브라우저가 `localhost` 포워딩으로 접근한다.
   - 토큰: 실행할 때마다 새로 만든 무작위 문자열 (`secrets.token_urlsafe(32)`).
@@ -37,6 +39,8 @@
 - `local`: 학생 PC의 `lms-runtime`.
 - `colab`: 학생 PC의 `lms-runtime --colab <session>`이 연 로컬 브리지. 프론트 입장에서 `local`과 같은 URL + 토큰이며, 2장의 경로를 그대로 중계한다.
   - Colab 런타임은 예고 없이 종료될 수 있다. 브리지는 이를 커널 `dead` 또는 REST 오류로 드러내고, 프론트는 2.4의 복구 흐름으로 처리한다.
+  - 오류 형식: Colab 런타임이 종료됐으면 REST `503`, 브리지가 Colab에 연결할 수 없으면 `502`. 본문은 `{"message": "<한국어 안내>"}`이며 프론트는 `message`를 그대로 보여 준다. 열려 있던 WebSocket은 코드 `1011`로 닫는다.
+  - `colab stop` 직후 최대 약 15초 동안은 런타임이 정상처럼 응답할 수 있다(브리지가 세션 상태를 주기적으로 확인하는 간격).
   - Colab 전용 메시지(`colab_request` 등)는 1단계에서 브리지가 버리거나 무시한다.
 - `remote`: 연구실 GPU 서버 등. 2장의 규칙을 그대로 따르는 Jupyter Server. (1단계 범위 밖)
 
@@ -61,3 +65,4 @@
 ## 변경 기록
 
 - 0.1 (2026-11-03): 저장소 분리와 함께 최초 작성.
+- 0.2 (2026-11-03): WebSocket 서브프로토콜 미선택 허용과 `session_id` 전달(2장), Colab 브리지 오류 형식과 종료 감지 지연(3장).
