@@ -166,10 +166,17 @@ python3 -m venv .venv
     - 버리는 기준은 메시지 순서가 아니라 부모 `msg_id`다
   - 테스트 `tests/test_debug_drop_reply.py`, bridge·launch 테스트
   - colab-bridge 브랜치를 main에 병합
+- 2026-11-03 (WSL) local 런타임 오류 응답의 CORS 수정
+  - 증상: 예전 런타임의 커널 id가 404로 돌아왔는데, 브라우저에는 CORS 오류로 보였다. 그래서 프론트가 새 커널을 만들지 못하고 "연결 실패"를 띄웠다
+  - 원인: Jupyter Server는 CORS 헤더를 `prepare()`에서 붙인다. 오류가 나면 tornado `send_error()`가 `clear()`로 헤더를 지워서, 403·404 응답에 ACAO가 빠졌다
+  - 수정: `lms_kernel/server.py`(`LMSServerApp`)가 허용 origin을 `tornado_settings["headers"]`에 넣어 모든 응답에 붙인다. `lms-runtime`은 `-m lms_kernel.server`로 띄운다. 회귀 테스트를 추가했다
+  - 브라우저 확인(local + `--debug-drop-reply-once`)
+    - 예전 커널 404 → 새 커널 생성
+    - 첫 셀: 약 8초 뒤 "결과 일부 누락"으로 종료
+    - 두 번째 셀: 정상
 
 ### 다음 작업 (WSL, 우선순위 순)
-1. **응답 누락 대책 브라우저 확인**: local + `--debug-drop-reply-once`로 코스 페이지에서 첫 셀이 "결과 일부 누락"으로 끝나는지 확인한다(사용자)
-2. **Colab 안내 범위 결정**: 끊김은 간헐적이고, 끊길 때 메시지 약 1개를 잃을 수 있다. 프론트 대책은 들어갔다(LMS 95a346b). 브라우저 확인과 googlecolab 이슈 답변을 보고 베타로 열지 정한다
-3. **Colab 브라우저 확인**: https://lms.132-145-125-71.sslip.io/courses/transformer/1 과 `/runtime-test`에서 `lms-runtime --colab` URL/Token으로 확인한다
-4. **Colab 쪽 `lms_kernel` 설치 방식**: 계약 4장 "헬퍼 버전 확인"과 함께 LMS 세션과 정한다
-5. **커널 헬퍼**: 환경 점검 → 변수 인스펙터 → `lms_viz` 순. 각각 결과 형식을 먼저 계약 문서에 정한다(LMS 세션과 합의)
+1. **Colab 안내 범위 결정**: 끊김은 간헐적이고, 끊길 때 메시지 약 1개를 잃을 수 있다. 프론트 대책(LMS 95a346b)은 브라우저에서 확인했다. googlecolab 이슈 답변을 보고 베타로 열지 정한다
+2. **Colab 브라우저 확인**: https://lms.132-145-125-71.sslip.io/courses/transformer/1 과 `/runtime-test`에서 `lms-runtime --colab` URL/Token으로 확인한다
+3. **Colab 쪽 `lms_kernel` 설치 방식**: 계약 4장 "헬퍼 버전 확인"과 함께 LMS 세션과 정한다
+4. **커널 헬퍼**: 환경 점검 → 변수 인스펙터 → `lms_viz` 순. 각각 결과 형식을 먼저 계약 문서에 정한다(LMS 세션과 합의)
