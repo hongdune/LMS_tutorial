@@ -8,6 +8,13 @@ dependencies = [
     "ipykernel>=6.29",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "requests>=2.31",
+    "websocket-client>=1.7",
+]
+
 [project.scripts]
 lms-runtime = "lms_kernel.launch:main"
 
@@ -17,3 +24,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

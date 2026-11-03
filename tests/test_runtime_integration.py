@@ -1,0 +1,146 @@
+"""Start a real Jupyter Server via build_command and exercise the contract paths."""
+
+import json
+import socket
+import subprocess
+import time
+import uuid
+
+import pytest
+import requests
+import websocket
+
+from lms_kernel.launch import build_command
+
+ORIGIN = "http://lms.test:3000"
+TOKEN = "integration-test-token"
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+@pytest.fixture(scope="module")
+def runtime():
+    port = _free_port()
+    proc = subprocess.Popen(
+        build_command(ORIGIN, port, TOKEN),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    base = f"http://127.0.0.1:{port}"
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        try:
+            requests.get(f"{base}/api", timeout=1)
+            break
+        except requests.ConnectionError:
+            time.sleep(0.2)
+    else:
+        proc.kill()
+        pytest.fail("Jupyter Server did not start")
+    yield base, port
+    proc.terminate()
+    proc.wait(timeout=10)
+
+
+def _auth():
+    return {"Authorization": f"token {TOKEN}"}
+
+
+def test_rejects_missing_token(runtime):
+    base, _ = runtime
+    assert requests.get(f"{base}/api/kernels", timeout=5).status_code == 403
+
+
+def test_cors_header_is_fixed_to_allowed_origin(runtime):
+    base, _ = runtime
+    ok = requests.get(f"{base}/api/kernels", headers={**_auth(), "Origin": ORIGIN}, timeout=5)
+    assert ok.status_code == 200
+    assert ok.headers.get("Access-Control-Allow-Origin") == ORIGIN
+
+
+def test_rest_rejects_foreign_origin_even_with_token(runtime):
+    base, _ = runtime
+    r = requests.post(
+        f"{base}/api/kernels",
+        headers={**_auth(), "Origin": "http://evil.test"},
+        json={"name": "python3"},
+        timeout=10,
+    )
+    # Jupyter answers blocked cross-origin API requests with 404.
+    assert r.status_code == 404
+
+
+def test_script_without_origin_is_allowed(runtime):
+    base, _ = runtime
+    assert requests.get(f"{base}/api/kernels", headers=_auth(), timeout=5).status_code == 200
+
+
+def _msg(msg_type: str, content: dict) -> dict:
+    return {
+        "header": {
+            "msg_id": uuid.uuid4().hex,
+            "msg_type": msg_type,
+            "username": "test",
+            "session": uuid.uuid4().hex,
+            "version": "5.3",
+            "date": "",
+        },
+        "parent_header": {},
+        "metadata": {},
+        "content": content,
+        "channel": "shell",
+    }
+
+
+def test_execute_over_websocket(runtime):
+    base, port = runtime
+    r = requests.post(f"{base}/api/kernels", headers=_auth(), json={"name": "python3"}, timeout=10)
+    assert r.status_code == 201
+    kernel_id = r.json()["id"]
+    try:
+        # Browsers cannot set headers on WebSocket, so the token goes in the query string.
+        ws = websocket.create_connection(
+            f"ws://127.0.0.1:{port}/api/kernels/{kernel_id}/channels?token={TOKEN}",
+            origin=ORIGIN,
+            timeout=30,
+        )
+        req = _msg("execute_request", {
+            "code": "print('hello')\n1 + 1",
+            "silent": False,
+            "store_history": True,
+            "user_expressions": {},
+            "allow_stdin": False,
+        })
+        ws.send(json.dumps(req))
+        seen = {}
+        while True:
+            m = json.loads(ws.recv())
+            if m.get("parent_header", {}).get("msg_id") != req["header"]["msg_id"]:
+                continue
+            seen[m["msg_type"]] = m["content"]
+            if m["msg_type"] == "status" and m["content"]["execution_state"] == "idle":
+                break
+        ws.close()
+        assert seen["stream"]["text"] == "hello\n"
+        assert seen["execute_result"]["data"]["text/plain"] == "2"
+    finally:
+        requests.delete(f"{base}/api/kernels/{kernel_id}", headers=_auth(), timeout=10)
+
+
+def test_websocket_rejects_foreign_origin(runtime):
+    base, port = runtime
+    r = requests.post(f"{base}/api/kernels", headers=_auth(), json={"name": "python3"}, timeout=10)
+    kernel_id = r.json()["id"]
+    try:
+        with pytest.raises(websocket.WebSocketBadStatusException):
+            websocket.create_connection(
+                f"ws://127.0.0.1:{port}/api/kernels/{kernel_id}/channels?token={TOKEN}",
+                origin="http://evil.test",
+                timeout=10,
+            )
+    finally:
+        requests.delete(f"{base}/api/kernels/{kernel_id}", headers=_auth(), timeout=10)

@@ -20,6 +20,7 @@ def build_command(origin: str, port: int, token: str) -> list[str]:
         "--ServerApp.ip=127.0.0.1",
         f"--ServerApp.allow_origin={origin}",
         f"--IdentityProvider.token={token}",
+        "--ServerApp.identity_provider_class=lms_kernel.auth.StrictOriginIdentityProvider",
     ]
 
 
