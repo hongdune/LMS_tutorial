@@ -196,9 +196,12 @@ python3 -m venv .venv
   - `variables()` 제외 규칙을 `user_ns_hidden` 방식(v0.4)으로 바꿨다. 새 커널에서 `open`이 빠지고, 학생이 `open = 1`로 덮어쓰면 다시 보이는 것을 테스트했다
   - `info()`의 `contract`를 `"0.5"`로 올렸다
   - 구현과 계약이 다른 점(고치지 않고 LMS 세션에 알림): 계약은 4,300자리를 넘는 int만 `int`로 표시하는데, 구현은 `bit_length() > 400`(약 120자리)부터 `int`로 표시한다
+- 2026-11-03 (WSL) 계약 v0.6
+  - `docs/runtime-contract.md`를 v0.6(LMS a28965c)으로 갱신하고 `diff`로 원본과 같은지 확인했다
+  - 계약을 구현에 맞췄다: 큰 int는 `bit_length() > 400`이면 `int`, 120자를 넘는 summary는 120자에서 자르고 `…`를 붙인다
+  - `info()`의 `contract`를 `"0.6"`으로 올렸다. 구현의 다른 부분은 바꾸지 않았다
 
 ### 다음 작업 (WSL, 우선순위 순)
 1. **Colab 안내 범위 결정**: 끊김은 간헐적이고, 끊길 때 메시지 약 1개를 잃을 수 있다. 프론트 대책(LMS 95a346b)은 브라우저에서 확인했다. googlecolab 이슈 답변을 보고 베타로 열지 정한다
 2. **Colab 브라우저 확인**: https://lms.132-145-125-71.sslip.io/courses/transformer/1 과 `/runtime-test`에서 `lms-runtime --colab` URL/Token으로 확인한다
 3. **Colab 쪽 `lms_kernel` 설치 방식**: 계약 4장 "헬퍼 버전 확인"과 함께 LMS 세션과 정한다
-4. **큰 int summary 기준**: 계약(4,300자리 초과)과 구현(약 120자리 초과)이 다르다. LMS 세션이 어느 쪽에 맞출지 정하면 반영한다

@@ -1,6 +1,6 @@
 # LMS ↔ 학생 런타임 인터페이스 계약
 
-- 버전: **0.5** (2026-11-03)
+- 버전: **0.6** (2026-11-03)
 - 원본: `hongdune/LMS`의 `docs/runtime-contract.md`. `hongdune/LMS_tutorial`에는 같은 내용의 사본을 둔다.
 - 변경 절차: 내용을 바꾸면 버전을 올리고 아래 변경 기록에 한 줄을 남긴 뒤, 두 저장소의 파일을 **같은 내용으로** 갱신한다. 한쪽만 바뀐 상태로 커밋하지 않는다.
 - "결정 대기"로 표시한 항목은 한쪽에서 임의로 정하지 않는다. 정할 때는 이 문서부터 고친다.
@@ -72,7 +72,7 @@
 ### 4.2 헬퍼 버전 확인 — `info()`
 
 ```json
-{"version": 1, "lms_kernel": "0.3.0", "contract": "0.5"}
+{"version": 1, "lms_kernel": "0.3.0", "contract": "0.6"}
 ```
 
 - 프론트는 커널에 붙은 직후 한 번 부른다. `contract`가 프론트가 아는 계약 버전과 다르면 런타임 업데이트를 안내한다(실행은 막지 않는다).
@@ -122,10 +122,10 @@
 ```
 
 - 대상: IPython 사용자 네임스페이스(`user_ns`)에서 `_`로 시작하는 이름, 모듈 객체, IPython·ipykernel이 넣은 이름을 뺀 나머지. 넣은 이름은 IPython `%who`와 같은 규칙으로 판별한다: `user_ns_hidden`에 같은 이름이 있고 값이 **같은 객체**면 제외(`In`, `Out`, `exit`, `quit`, `get_ipython`, ipykernel의 `open` 등). 학생이 같은 이름에 새 값을 넣었으면 포함한다. 이름순으로 최대 200개, 넘으면 `truncated: true`.
-- 공통 필드: `name`, `type`(모듈 경로를 포함한 클래스 이름), `summary`(한 줄, 최대 120자).
+- 공통 필드: `name`, `type`(모듈 경로를 포함한 클래스 이름), `summary`(한 줄, 최대 120자). 규칙대로 만든 값이 120자를 넘으면 120자에서 자르고 끝에 `…`를 붙인다(예: 119~120자 문자열의 repr은 따옴표 때문에 넘친다).
 - `torch.Tensor`·`numpy.ndarray`: `shape`, `dtype`, `device`(ndarray는 `"cpu"`), `nbytes`. `dtype`은 각 라이브러리의 표기를 그대로 쓴다(torch `"torch.float32"`, numpy `"float32"`).
 - `torch.nn.Module`: `params`(전체 파라미터 수), `trainable`(`requires_grad`인 파라미터 수).
-- 그 밖의 타입은 공통 필드만. `summary`는 숫자·bool·None·120자 이하 문자열이면 `repr`, 긴 문자열·컨테이너면 `str[500]`·`list[3]`처럼 길이만, 그 밖에는 클래스 이름. 4,300자리를 넘는 int는 `int`(파이썬이 repr을 거부한다). 학생이 정의한 함수·클래스도 포함한다(`type: "function"` 등).
+- 그 밖의 타입은 공통 필드만. `summary`는 숫자·bool·None·120자 이하 문자열이면 `repr`, 긴 문자열·컨테이너면 `str[500]`·`list[3]`처럼 길이만, 그 밖에는 클래스 이름. `bit_length() > 400`(약 120자리)인 int는 repr 대신 `int`로 표시한다(120자에서 잘린 숫자는 의미가 없고, 아주 큰 int는 파이썬이 repr을 거부한다). 학생이 정의한 함수·클래스도 포함한다(`type: "function"` 등).
 
 `module_tree(name)`: 이름이 가리키는 `nn.Module`의 하위 모듈 트리.
 
@@ -163,6 +163,7 @@
 
 - 0.1 (2026-11-03): 저장소 분리와 함께 최초 작성.
 - 0.2 (2026-11-03): WebSocket 서브프로토콜 미선택 허용과 `session_id` 전달(2장), Colab 브리지 오류 형식과 종료 감지 지연(3장).
+- 0.6 (2026-11-03): 인스펙터 `summary`의 큰 int 기준(`bit_length() > 400`)과 120자 초과 시 자르기 규칙을 구현(LMS_tutorial 37d5790)에 맞춤.
 - 0.5 (2026-11-03): LMS_tutorial 구현(d202e0c)에서 정한 세부 사항 반영 — `env`의 해석 불가 요구사항(`name: null`)과 torch import 실패(`torch.error`), 인스펙터 `dtype` 표기·`summary` 규칙·함수 포함, `module_tree` 루트 `truncated`, `lms_viz` 축소 방식.
 - 0.4 (2026-11-03): 인스펙터 제외 규칙을 `user_ns_hidden` 기준으로 변경(ipykernel이 넣는 `open`이 변수로 잡히던 문제). 4.1 호출 방식은 실제 ipykernel로 검증함.
 - 0.3 (2026-11-03): 커널 안 헬퍼 확정(4장) — `user_expressions` 호출 방식, `info`·`env`·`variables`·`module_tree` 결과 스키마, `lms_viz` 위젯 3종(heatmap·line·scatter)의 MIME과 스키마, 실시간 갱신은 `update_display_data`.
