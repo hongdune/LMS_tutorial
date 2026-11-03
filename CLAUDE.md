@@ -175,8 +175,25 @@ python3 -m venv .venv
     - 첫 셀: 약 8초 뒤 "결과 일부 누락"으로 종료
     - 두 번째 셀: 정상
 
+- 2026-11-03 (WSL) 계약 v0.3, 커널 헬퍼
+  - `docs/runtime-contract.md`를 v0.3(LMS c70b100)으로 갱신하고 `diff`로 원본과 같은지 확인했다. 패키지 버전은 0.3.0이고, 의존성에 `packaging`을 추가했다
+  - `lms_kernel.frontend`: `info`·`env`·`variables`·`module_tree` (계약 4.1~4.4)
+    - torch/numpy는 학생이 이미 import했을 때만 `sys.modules`에서 본다. `env`만 torch가 설치돼 있으면 import한다
+    - 학생 코드를 부르지 않는다
+      - `repr`은 내장 스칼라 타입과 numpy 스칼라에만 쓴다
+      - 컨테이너 길이는 기반 타입의 `__len__`으로 잰다
+      - 타입 판별은 `isinstance` 대신 `issubclass(type(v))`
+      - 긴 문자열은 `str[N]`, 아주 큰 int는 `int`로만 표시한다
+  - `lms_viz`(최상위 패키지, 구현은 `lms_kernel.viz`): heatmap·line·scatter (계약 4.5)
+    - 만들면 바로 표시하고 핸들을 돌려준다. 핸들은 `_ipython_display_`가 있어 마지막 줄에 와도 두 번 표시되지 않는다
+    - line: `curve.append(step, train=..., val=...)`. 갱신은 0.2초 간격으로 묶어 보내고, 셀이 끝나면 `post_run_cell`에서 남은 갱신을 보낸다
+    - 제한을 넘으면 heatmap은 잘라 내고, line·scatter는 첫 점과 끝 점을 넣어 고르게 다운샘플링한다
+  - `--debug-drop-reply-once`를 `--help`에 보이게 하고, 프론트의 `info()` 호출이 대신 버려진다는 점을 적었다
+  - 테스트 `tests/test_frontend.py`: 실제 ipykernel에 계약 4.1 형식으로 호출한다(torch 있음 / `sys.modules['torch']=None`으로 없음)
+  - 계약 제안(미반영): ipykernel이 넣는 `open`이 `variables()`에 나온다. 제외 목록을 "`user_ns_hidden`에 있고 값이 그대로인 이름"(IPython `%who`와 같은 규칙)으로 바꾸자고 LMS 세션에 제안했다
+
 ### 다음 작업 (WSL, 우선순위 순)
 1. **Colab 안내 범위 결정**: 끊김은 간헐적이고, 끊길 때 메시지 약 1개를 잃을 수 있다. 프론트 대책(LMS 95a346b)은 브라우저에서 확인했다. googlecolab 이슈 답변을 보고 베타로 열지 정한다
 2. **Colab 브라우저 확인**: https://lms.132-145-125-71.sslip.io/courses/transformer/1 과 `/runtime-test`에서 `lms-runtime --colab` URL/Token으로 확인한다
 3. **Colab 쪽 `lms_kernel` 설치 방식**: 계약 4장 "헬퍼 버전 확인"과 함께 LMS 세션과 정한다
-4. **커널 헬퍼**: 환경 점검 → 변수 인스펙터 → `lms_viz` 순. 각각 결과 형식을 먼저 계약 문서에 정한다(LMS 세션과 합의)
+4. **`variables()`의 `open` 제외**: 계약 4.4 제외 규칙 변경을 LMS 세션이 결정하면 반영한다

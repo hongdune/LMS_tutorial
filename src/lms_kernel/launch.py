@@ -18,7 +18,9 @@ import sys
 
 DEFAULT_ORIGIN = "http://localhost:3000"
 DEBUG_DROP_REPLY_NOTICE = (
-    "[진단] --debug-drop-reply-once: 커널마다 첫 실행의 응답(execute_reply, idle)을 브라우저로 보내지 않습니다."
+    "[진단] --debug-drop-reply-once: 커널마다 첫 실행의 응답(execute_reply, idle)을 브라우저로 보내지 않습니다.\n"
+    "  헬퍼 호출도 실행으로 셉니다. LMS 프론트는 커널에 붙자마자 info()를 부르므로, 첫 셀이 아니라 "
+    "이 헬퍼의 응답이 버려집니다."
 )
 
 
@@ -147,7 +149,12 @@ def main() -> None:
     parser.add_argument(
         "--debug-drop-reply-once",
         action="store_true",
-        help=argparse.SUPPRESS,  # diagnostics: per kernel, hide the first execute_reply + its idle
+        help=(
+            "diagnostics: per kernel, do not send the first execute_reply and its idle status "
+            "to the browser. This counts every execution, including silent helper calls: the "
+            "LMS frontend calls lms_kernel.frontend.info() right after connecting, so that "
+            "helper reply is the one dropped, not the first cell's"
+        ),
     )
     args = parser.parse_args()
 

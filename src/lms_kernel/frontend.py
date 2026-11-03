@@ -1,0 +1,253 @@
+"""Helpers the LMS frontend calls inside the kernel (runtime contract 4.1-4.4).
+
+Called as ``user_expressions`` of an empty, silent execute_request, e.g.
+``__import__('lms_kernel.frontend').frontend.variables()``. Every function returns an
+object with ``_repr_json_()``; the result arrives in
+``execute_reply.user_expressions.r.data["application/json"]``.
+
+Rules (contract 4.1):
+- nothing is added to the student's namespace;
+- student objects are never evaluated: no tensor element reads, no GPU sync, no
+  ``__repr__``/``__len__`` of arbitrary objects. Only metadata is read;
+- results carry ``"version": 1`` and contain no NaN/Infinity.
+
+torch and numpy are optional. ``variables()``/``module_tree()`` only look at them when
+the student already imported them (``sys.modules``); ``env()`` imports torch only if it
+is installed.
+"""
+
+from __future__ import annotations
+
+import collections
+import importlib.metadata
+import importlib.util
+import platform
+import sys
+import types
+from typing import Any, Optional
+
+from . import __version__
+
+CONTRACT_VERSION = "0.3"
+SCHEMA_VERSION = 1
+
+MAX_VARIABLES = 200
+MAX_SUMMARY = 120
+TREE_MAX_DEPTH = 6
+TREE_MAX_CHILDREN = 100
+
+# Names IPython puts into the user namespace (contract 4.4).
+IPYTHON_NAMES = frozenset({"In", "Out", "exit", "quit", "get_ipython"})
+# Exact types whose repr is cheap and ours (not the student's) to call.
+REPR_TYPES = (bool, int, float, complex, str, type(None))
+CONTAINER_TYPES = (list, tuple, dict, set, frozenset, collections.deque)
+
+
+class Result:
+    """A helper result: IPython formats it as application/json via _repr_json_."""
+
+    def __init__(self, data: dict):
+        self.data = data
+
+    def _repr_json_(self):
+        return self.data
+
+    def __repr__(self):
+        return f"<lms_kernel result: {', '.join(self.data)}>"
+
+
+# --- 4.2 info ---------------------------------------------------------------------------
+
+def info() -> Result:
+    return Result({"version": SCHEMA_VERSION, "lms_kernel": __version__, "contract": CONTRACT_VERSION})
+
+
+# --- 4.3 env ----------------------------------------------------------------------------
+
+def _package(requirement: str) -> dict:
+    from packaging.requirements import InvalidRequirement, Requirement
+
+    try:
+        req = Requirement(requirement)
+    except InvalidRequirement as e:
+        return {"requirement": requirement, "name": None, "installed": None, "ok": False,
+                "error": str(e)}
+    try:
+        installed: Optional[str] = importlib.metadata.version(req.name)
+    except importlib.metadata.PackageNotFoundError:
+        installed = None
+    ok = installed is not None and req.specifier.contains(installed, prereleases=True)
+    return {"requirement": requirement, "name": req.name, "installed": installed, "ok": ok}
+
+
+def _torch_env() -> Optional[dict]:
+    if importlib.util.find_spec("torch") is None:
+        return None
+    no_cuda = {"available": False, "version": None, "devices": []}
+    try:
+        import torch
+    except Exception as e:  # installed but broken (e.g. missing CUDA libraries)
+        try:
+            version = importlib.metadata.version("torch")
+        except importlib.metadata.PackageNotFoundError:
+            version = None
+        return {"version": version, "cuda": no_cuda, "mps": False,
+                "error": f"{type(e).__name__}: {e}"[:500]}
+
+    cuda = no_cuda
+    if torch.cuda.is_available():
+        devices = []
+        for i in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(i)
+            devices.append({"name": props.name, "memory_total": int(props.total_memory)})
+        cuda = {"available": True, "version": torch.version.cuda, "devices": devices}
+    mps_backend = getattr(torch.backends, "mps", None)
+    mps = bool(mps_backend and mps_backend.is_available())
+    return {"version": torch.__version__, "cuda": cuda, "mps": mps}
+
+
+def env(requirements=()) -> Result:
+    if isinstance(requirements, str):
+        requirements = [requirements]
+    return Result({
+        "version": SCHEMA_VERSION,
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "packages": [_package(str(r)) for r in requirements],
+        "torch": _torch_env(),
+    })
+
+
+# --- 4.4 variables / module_tree --------------------------------------------------------
+
+def _user_ns() -> dict:
+    try:
+        from IPython import get_ipython
+
+        shell = get_ipython()
+    except Exception:
+        shell = None
+    if shell is not None:
+        return shell.user_ns
+    return sys.modules["__main__"].__dict__
+
+
+def _type_name(cls: type) -> str:
+    module = getattr(cls, "__module__", None) or ""
+    name = getattr(cls, "__qualname__", None) or cls.__name__
+    return name if module == "builtins" else f"{module}.{name}"
+
+
+def _clip(text: str) -> str:
+    return text if len(text) <= MAX_SUMMARY else text[: MAX_SUMMARY - 1] + "…"
+
+
+def _summary(value: Any) -> str:
+    cls = type(value)
+    if cls is str:
+        return _clip(repr(value)) if len(value) <= MAX_SUMMARY else f"str[{len(value)}]"
+    if cls is int and value.bit_length() > 400:  # repr would be huge (or raise past 4300 digits)
+        return "int"
+    if cls in REPR_TYPES:
+        return _clip(repr(value))
+    np = sys.modules.get("numpy")
+    if np is not None and issubclass(cls, np.generic) and not issubclass(cls, (np.str_, np.bytes_, np.void)):
+        return _clip(repr(value))  # numpy scalar: numpy's own repr
+    for base in CONTAINER_TYPES:
+        if issubclass(cls, base):
+            # The base type's C-level __len__, never a subclass override.
+            return f"{cls.__name__}[{base.__len__(value)}]"
+    return _clip(cls.__name__)
+
+
+def _torch_module():
+    return sys.modules.get("torch")
+
+
+def _module_params(module) -> tuple[Optional[int], Optional[int]]:
+    try:
+        total = trainable = 0
+        for p in module.parameters():
+            n = p.numel()
+            total += n
+            if p.requires_grad:
+                trainable += n
+        return total, trainable
+    except Exception:  # e.g. uninitialized lazy parameters
+        return None, None
+
+
+def _describe(name: str, value: Any) -> dict:
+    cls = type(value)
+    item = {"name": name, "type": _type_name(cls), "summary": _summary(value)}
+    try:
+        torch = _torch_module()
+        np = sys.modules.get("numpy")
+        if torch is not None and issubclass(cls, torch.Tensor):
+            shape = list(value.shape)
+            item.update(
+                summary=_clip(f"Tensor({', '.join(map(str, shape))})"),
+                shape=shape,
+                dtype=str(value.dtype),
+                device=str(value.device),
+                nbytes=value.element_size() * value.nelement(),
+            )
+        elif np is not None and issubclass(cls, np.ndarray):
+            shape = list(value.shape)
+            item.update(
+                summary=_clip(f"ndarray({', '.join(map(str, shape))})"),
+                shape=shape,
+                dtype=str(value.dtype),
+                device="cpu",
+                nbytes=int(value.nbytes),
+            )
+        elif torch is not None and issubclass(cls, torch.nn.Module):
+            params, trainable = _module_params(value)
+            item.update(params=params, trainable=trainable)
+    except Exception:
+        pass  # odd subclass or proxy: keep the common fields only
+    return item
+
+
+def variables() -> Result:
+    ns = _user_ns()
+    names = sorted(
+        n for n, v in list(ns.items())
+        if isinstance(n, str)
+        and not n.startswith("_")
+        and n not in IPYTHON_NAMES
+        and not issubclass(type(v), types.ModuleType)
+    )
+    truncated = len(names) > MAX_VARIABLES
+    return Result({
+        "version": SCHEMA_VERSION,
+        "variables": [_describe(n, ns[n]) for n in names[:MAX_VARIABLES]],
+        "truncated": truncated,
+    })
+
+
+def _tree(name: str, module, depth: int) -> dict:
+    params, trainable = _module_params(module)
+    node = {"name": name, "type": _type_name(type(module)), "params": params,
+            "trainable": trainable, "children": []}
+    children = list(module.named_children())
+    if children and depth >= TREE_MAX_DEPTH:
+        node["truncated"] = True
+        return node
+    if len(children) > TREE_MAX_CHILDREN:
+        node["truncated"] = True
+    node["children"] = [_tree(n, m, depth + 1) for n, m in children[:TREE_MAX_CHILDREN]]
+    return node
+
+
+def module_tree(name: str) -> Result:
+    ns = _user_ns()
+    if name not in ns:
+        raise KeyError(name)
+    value = ns[name]
+    torch = _torch_module()
+    if torch is None or not issubclass(type(value), torch.nn.Module):
+        raise TypeError(f"{name} is not a torch.nn.Module ({_type_name(type(value))})")
+    root = _tree(name, value, 0)
+    root.setdefault("truncated", False)
+    return Result({"version": SCHEMA_VERSION, **root})

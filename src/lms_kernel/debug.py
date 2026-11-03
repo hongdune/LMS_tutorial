@@ -4,6 +4,10 @@
 first ``execute_reply`` and the ``status: idle`` that belongs to the same execution are
 not sent to the browser. This reproduces the case where a WebSocket drop loses the
 reply, which a real drop does only occasionally. The kernel itself is untouched.
+
+Every execution counts, including silent helper calls (contract 4.1). The LMS frontend
+calls ``lms_kernel.frontend.info()`` right after connecting, so with that frontend the
+dropped reply is the helper's, not the first cell's.
 """
 
 from __future__ import annotations
