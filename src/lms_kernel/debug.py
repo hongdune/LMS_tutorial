@@ -1,13 +1,15 @@
 """Diagnostics for checking how the LMS frontend recovers from lost kernel replies.
 
-``--debug-drop-reply-once`` (hidden option, local and Colab mode): for each kernel, the
-first ``execute_reply`` and the ``status: idle`` that belongs to the same execution are
-not sent to the browser. This reproduces the case where a WebSocket drop loses the
-reply, which a real drop does only occasionally. The kernel itself is untouched.
+``--debug-drop-reply-once`` (local and Colab mode): for each kernel, the
+``execute_reply`` and the ``status: idle`` of the first non-silent execution (the
+student's first cell) are not sent to the browser. This reproduces the case where a
+WebSocket drop loses the reply, which a real drop does only occasionally. The kernel
+itself is untouched.
 
-Every execution counts, including silent helper calls (contract 4.1). The LMS frontend
-calls ``lms_kernel.frontend.info()`` right after connecting, so with that frontend the
-dropped reply is the helper's, not the first cell's.
+Silent executions (helper calls, contract 4.1, e.g. ``info()`` right after connecting)
+are skipped. Only outgoing messages are seen, so the target is the first execution that
+publishes ``execute_input``: kernels publish it for non-silent requests only, before the
+reply.
 """
 
 from __future__ import annotations
@@ -32,6 +34,10 @@ class ReplyDropper:
         header = msg.get("header") or {}
         parent = msg.get("parent_header") or {}
         msg_type = header.get("msg_type") or msg.get("msg_type")
+        if msg_type == "execute_input":
+            if st["target"] is None:
+                st["target"] = parent.get("msg_id")
+            return False
         if msg_type == "execute_reply":
             kind = "reply"
         elif (
@@ -43,9 +49,7 @@ class ReplyDropper:
         else:
             return False
         parent_id = parent.get("msg_id")
-        if st["target"] is None:
-            st["target"] = parent_id
-        if parent_id != st["target"] or kind not in st["left"]:
+        if st["target"] is None or parent_id != st["target"] or kind not in st["left"]:
             return False
         st["left"].discard(kind)
         log.warning("debug: dropped %s for kernel %s", msg_type, kernel_id)

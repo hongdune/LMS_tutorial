@@ -23,9 +23,8 @@ DEFAULT_IDLE_TIMEOUT_MINUTES = 0  # local: off
 DEFAULT_COLAB_IDLE_TIMEOUT_MINUTES = 60  # colab: return the VM with `colab stop`
 CULL_INTERVAL_SECONDS = 300
 DEBUG_DROP_REPLY_NOTICE = (
-    "[진단] --debug-drop-reply-once: 커널마다 첫 실행의 응답(execute_reply, idle)을 브라우저로 보내지 않습니다.\n"
-    "  헬퍼 호출도 실행으로 셉니다. LMS 프론트는 커널에 붙자마자 info()를 부르므로, 첫 셀이 아니라 "
-    "이 헬퍼의 응답이 버려집니다."
+    "[진단] --debug-drop-reply-once: 커널마다 첫 셀 실행의 응답(execute_reply, idle)을 브라우저로 보내지 않습니다.\n"
+    "  info() 같은 헬퍼 호출(silent 실행)은 세지 않습니다."
 )
 
 
@@ -233,10 +232,9 @@ def main() -> None:
         "--debug-drop-reply-once",
         action="store_true",
         help=(
-            "diagnostics: per kernel, do not send the first execute_reply and its idle status "
-            "to the browser. This counts every execution, including silent helper calls: the "
-            "LMS frontend calls lms_kernel.frontend.info() right after connecting, so that "
-            "helper reply is the one dropped, not the first cell's"
+            "diagnostics: per kernel, do not send the execute_reply and idle status of the "
+            "first cell (first non-silent execution) to the browser. Silent helper calls such "
+            "as lms_kernel.frontend.info() are not counted"
         ),
     )
     args = parser.parse_args()

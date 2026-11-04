@@ -1,5 +1,6 @@
-"""--debug-drop-reply-once: per kernel, the first execute_reply and its idle status never
-reach the browser (local Jupyter Server and Colab bridge)."""
+"""--debug-drop-reply-once: per kernel, the execute_reply and idle status of the first
+non-silent execution never reach the browser (local Jupyter Server and Colab bridge).
+Silent helper calls before it are passed through."""
 
 import json
 import socket
@@ -28,8 +29,14 @@ def _m(msg_type, parent_id, parent_type="execute_request", state=None):
 
 def test_reply_dropper_unit():
     d = ReplyDropper()
-    # idle may arrive before the reply; busy, stream and other kernels are untouched
+    # silent execution (no execute_input): passed through
+    assert not d.should_drop("k1", _m("status", "s", state="busy"))
+    assert not d.should_drop("k1", _m("execute_reply", "s"))
+    assert not d.should_drop("k1", _m("status", "s", state="idle"))
+    # first cell: execute_input marks it. idle may arrive before the reply;
+    # busy, stream and other kernels are untouched
     assert not d.should_drop("k1", _m("status", "a", state="busy"))
+    assert not d.should_drop("k1", _m("execute_input", "a"))
     assert not d.should_drop("k1", _m("stream", "a"))
     assert not d.should_drop("k1", _m("status", "x", parent_type="kernel_info_request", state="idle"))
     assert d.should_drop("k1", _m("status", "a", state="idle"))
@@ -39,6 +46,7 @@ def test_reply_dropper_unit():
     assert not d.should_drop("k1", _m("execute_reply", "c"))
     assert not d.should_drop("k1", _m("status", "c", state="idle"))
     # every kernel gets its own drop
+    assert not d.should_drop("k2", _m("execute_input", "z"))
     assert d.should_drop("k2", _m("execute_reply", "z"))
     assert d.should_drop("k2", _m("status", "z", state="idle"))
 
@@ -49,14 +57,14 @@ def _free_port():
         return s.getsockname()[1]
 
 
-def _execute(ws, code, wait_extra=3.0):
+def _execute(ws, code, wait_extra=3.0, silent=False):
     """Send code; return message types for it, waiting `wait_extra`s after the stream."""
     mid = uuid.uuid4().hex
     ws.send(json.dumps({
         "header": {"msg_id": mid, "msg_type": "execute_request", "username": "t",
                    "session": uuid.uuid4().hex, "version": "5.3", "date": ""},
         "parent_header": {}, "metadata": {}, "channel": "shell",
-        "content": {"code": code, "silent": False, "store_history": True,
+        "content": {"code": code, "silent": silent, "store_history": not silent,
                     "user_expressions": {}, "allow_stdin": False},
     }))
     types, deadline = [], time.time() + 60
@@ -68,7 +76,7 @@ def _execute(ws, code, wait_extra=3.0):
         if m.get("parent_header", {}).get("msg_id") != mid:
             continue
         types.append((m["msg_type"], m["content"].get("execution_state")))
-        if m["msg_type"] == "stream":
+        if m["msg_type"] == "stream" or (silent and m["msg_type"] == "status"):
             ws.settimeout(wait_extra)
         if ("execute_reply", None) in types and ("status", "idle") in types:
             break
@@ -82,6 +90,9 @@ def check_first_reply_dropped(base, ws_base, headers, ws_kw, token=TOKEN):
     try:
         ws = websocket.create_connection(
             f"{ws_base}/api/kernels/{kid}/channels?session_id=s1&token={token}", timeout=60, **ws_kw)
+        # The LMS frontend calls info() (silent) right after connecting: not the one dropped.
+        helper = _execute(ws, "", silent=True)
+        assert ("execute_reply", None) in helper and ("status", "idle") in helper
         first = _execute(ws, "print(1)")
         assert ("stream", None) in first
         assert ("execute_reply", None) not in first and ("status", "idle") not in first

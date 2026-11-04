@@ -80,7 +80,7 @@ OCI 인스턴스 (LMS 저장소)                   학생 PC: Windows + WSL (이
 - **WS 끊김 (미해결, 완화됨)**: 실행 도중 프록시가 WS를 끊는 현상이 있다. 2026-11-03 오전에는 `import torch` 실행 중에 자주 재현됐지만, 같은 날 오후에는 자연 끊김이 24회 중 0회였다. 간헐적이고 원인은 모른다. 같은 코드를 `colab exec`로 실행하면 정상이고, 남은 차이는 CLI의 클라이언트 식별 헤더뿐이다. 이 헤더는 흉내 내지 않는다(googlecolab에 문의할 예정).
   - 복구: Colab의 jupyter-server는 같은 `session_id`로 다시 붙으면, 끊긴 동안 쌓인 메시지를 재전송한다(강제 끊김 실측: 0.3초 안에 재전송).
   - **한계**: 끊기는 순간 주변의 메시지 약 1개는 재전송되지 않고 사라진다(강제 끊김 15회 중 6회, 5초 뒤 재연결하면 3회 모두). 프록시 쪽 옛 연결로 이미 나간 메시지로 보인다. 사라진 것이 `execute_reply`나 마지막 `status: idle`이면 프론트는 실행이 끝나지 않은 것처럼 보인다.
-  - 브리지 기본값은 B: 업스트림만 같은 `session_id`로 다시 연결한다(약 0.5초, 브라우저 WS 유지). 재시도 간격은 0, 1, 2, 4초이고, 모두 실패하거나 커널이 404면 브라우저 WS를 1011로 닫는다. 진단용 숨김 옵션은 `--no-upstream-reconnect`와 `--debug-drop-upstream-after <초>`다. `--debug-drop-reply-once`는 local 모드에서도 쓸 수 있고, 커널마다 첫 실행의 `execute_reply`와 그 실행의 `status: idle`을 브라우저로 보내지 않는다(응답 누락 재현용).
+  - 브리지 기본값은 B: 업스트림만 같은 `session_id`로 다시 연결한다(약 0.5초, 브라우저 WS 유지). 재시도 간격은 0, 1, 2, 4초이고, 모두 실패하거나 커널이 404면 브라우저 WS를 1011로 닫는다. 진단용 숨김 옵션은 `--no-upstream-reconnect`와 `--debug-drop-upstream-after <초>`다. `--debug-drop-reply-once`는 local 모드에서도 쓸 수 있고, 커널마다 첫 셀(silent가 아닌 첫 실행)의 `execute_reply`와 그 실행의 `status: idle`을 브라우저로 보내지 않는다(응답 누락 재현용). `info()` 같은 silent 헬퍼 호출은 세지 않는다.
 
 ### 유휴 종료와 컴퓨트 유닛 실측 (2026-11-05, T4, CLI 0.7.5)
 - `colab usage`로 잔액·사용률·할당 수를 볼 수 있다. T4 할당 직후 사용률은 1.15/hr이었다
@@ -255,6 +255,10 @@ python3 -m venv .venv
   - `lms-runtime --colab`이 시작할 때 CLI 버전을 확인한다. CLI를 실행하지 않고, 실행 파일(링크를 따라감)과 shebang 인터프리터의 venv에서 `google_colab_cli-*.dist-info/METADATA`를 읽는다. 0.7.5가 아니거나 확인하지 못하면 경고만 출력한다(`colab_session.PINNED_CLI_VERSION`)
   - `sessions.json` 형식이 다르면(JSON 아님, 목록이 dict가 아님, 세션에 url·token 없음) `SessionFormatError`로 알린다. 시작할 때는 안내를 출력하고 종료 1, 실행 중에는 REST 503과 안내 `message`. 세션이 아예 없으면 지금처럼 "종료됨"으로 처리한다
 
+- 2026-11-05 (WSL) `--debug-drop-reply-once`가 첫 셀을 버리도록 수정
+  - 지금까지는 프론트가 접속 직후 부르는 `info()`(silent)의 응답이 버려져서 첫 셀 누락이 재현되지 않았다. 이제 `execute_input`을 처음 보낸 실행(=silent가 아닌 첫 실행)을 대상으로 한다. 커널은 silent 요청에는 `execute_input`을 보내지 않는다
+  - 브라우저 확인 절차(LMS 95a346b, "첫 셀: 약 8초 뒤 결과 일부 누락")는 원래 의도대로 다시 맞는다. LMS 세션에 알릴 것
+
 ### 다음 작업 (WSL, 우선순위 순)
 0. **Colab 커널 유실 조사 (최우선)**: 3장 "API로 만든 커널이 첫 실행 직후 사라짐". 같은 순서를 다른 날·다른 리전에서 재현하는지, CPU 런타임에서도 그런지 확인한다. 연결 수가 0으로 보이는 이유도 본다. googlecolab 문의에 이 결과를 덧붙인다
 0-1. **쉬는 Colab 커널의 `last_activity`**: 커널이 유지되는 상태에서 몇 분 동안 값이 그대로인지 확인한다. 바뀌면 자동 반납이 일어나지 않는다. 자동 반납 자체(반납과 0.00/hr)는 실측으로 확인했다
@@ -263,5 +267,4 @@ python3 -m venv .venv
 3. **Colab 쪽 `lms_kernel` 설치 방식**: 계약 4장 "헬퍼 버전 확인"과 함께 LMS 세션과 정한다. 지금은 Colab 커널에 `lms_kernel`이 없어서 프론트의 `info()`·`variables()` 호출이 `ModuleNotFoundError`로 끝난다
 
 개선 후보 (2026-11-03 정리, 우선순위 순. 계약을 건드리는 것은 LMS 세션과 먼저 합의한다)
-7. **`--debug-drop-reply-once`와 `info()`**: 지금은 프론트가 접속 직후 부르는 `info()`(silent 실행)의 응답이 버려진다. silent 요청은 건너뛰고 학생의 첫 셀을 버리도록 바꿀지 정한다. 진단 옵션이라 계약은 바뀌지 않지만, 브라우저 확인 절차(LMS 95a346b)가 지금 동작에 맞춰져 있으면 LMS 세션에 알린다
 8. **googlecolab 이슈 후속**: 사용자가 제출한 두 이슈(로그의 자격증명, 서드파티 장시간 WS)의 URL을 3장에 적고, 답변에 따라 colab.log 경고와 WS 끊김 대책을 갱신한다
