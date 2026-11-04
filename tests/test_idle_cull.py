@@ -93,13 +93,41 @@ def _execute(ws, code):
     return msg_id
 
 
-def _wait_busy(ws, msg_id):
-    while True:
+def _wait_busy(ws, msg_id, limit=60):
+    deadline = time.time() + limit
+    while time.time() < deadline:
         m = json.loads(ws.recv())
         if (m.get("parent_header", {}).get("msg_id") == msg_id
                 and m["msg_type"] == "status"
                 and m["content"]["execution_state"] == "busy"):
             return
+    pytest.fail("kernel never reported busy for the request")
+
+
+def _wait_ready(ws, limit=60):
+    """kernel_info_request until answered, like @jupyterlab/services: a request sent while a
+    slow kernel is still starting can be lost. Each attempt is also kernel activity, so the
+    3s culler leaves the kernel alone meanwhile."""
+    deadline = time.time() + limit
+    while time.time() < deadline:
+        mid = uuid.uuid4().hex
+        ws.send(json.dumps({
+            "header": {"msg_id": mid, "msg_type": "kernel_info_request", "username": "t",
+                       "session": uuid.uuid4().hex, "version": "5.3"},
+            "parent_header": {}, "metadata": {}, "channel": "shell", "content": {},
+        }))
+        ws.settimeout(1)
+        try:
+            while True:
+                m = json.loads(ws.recv())
+                if (m.get("parent_header", {}).get("msg_id") == mid
+                        and m["msg_type"] == "kernel_info_reply"):
+                    return
+        except websocket.WebSocketTimeoutException:
+            continue
+        finally:
+            ws.settimeout(30)
+    pytest.fail("kernel never answered kernel_info_request")
 
 
 def _wait_gone(base, kid, limit):
@@ -132,6 +160,7 @@ def test_busy_kernel_is_not_culled(runtime):
     kid = _new_kernel(base)
     ws = _connect(port, kid)
     try:
+        _wait_ready(ws)
         _wait_busy(ws, _execute(ws, "import time; time.sleep(12)"))
         # Several cull rounds pass well beyond the idle timeout while it runs.
         time.sleep(IDLE_SECONDS + 5)
