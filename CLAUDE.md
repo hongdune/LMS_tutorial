@@ -75,7 +75,7 @@ OCI 인스턴스 (LMS 저장소)                   학생 PC: Windows + WSL (이
 - 갱신: CLI는 백그라운드에서 토큰을 갱신하지 않는다. 명령을 실행할 때 만료가 5분 안으로 남았거나 `status`/`sessions` 명령이면 `/tun/m/assignments`로 갱신한다. 서버에서 사라진 세션은 그때 파일에서 지운다. `colab stop`은 파일에서 바로 지운다.
 - 프록시는 **WebSocket ping에 응답하지 않는다.** ping을 켜면 약 25초 만에 끊기고, 끄면 70초 넘게 유지된다.
 - `colab stop` 직후에도 프록시는 약 85초 동안 REST에 200으로 응답한다. WS는 약 100초 뒤 닫힌다.
-- Colab 커널은 `colab_kernel_launcher`(jupyter-server 2.20)다. 커널 Python은 3.12, torch 2.11.0+cu130이다.
+- Colab 커널은 `colab_kernel_launcher`(jupyter-server 2.20)다. 커널 Python은 3.12(11-03)에서 3.13(11-05)으로 바뀌었다. torch는 2.11.0+cu130이다. Contents API 루트는 파일시스템 `/`이고, API로 만든 커널의 `sys.path` 앞쪽에 절대 경로 `/`가 있다
 - **CLI가 비밀값을 로그에 남긴다**: 명령마다 `~/.config/colab-cli/colab.log`(권한 0644)에 DEBUG 로그를 쓴다. 이 로그에 프록시 토큰, OAuth access token, **refresh token**이 들어간다. 실측에서 refresh token 2회를 확인했다. 끄는 옵션은 없다. `sessions.json`과 `token.json`도 0644다. 브리지는 CLI 호출을 토큰 만료 직전(약 1시간에 1회)과 장애 확인 때로 제한한다. 업스트림 이슈 제보 대상이다.
 - **WS 끊김 (미해결, 완화됨)**: 실행 도중 프록시가 WS를 끊는 현상이 있다. 2026-11-03 오전에는 `import torch` 실행 중에 자주 재현됐지만, 같은 날 오후에는 자연 끊김이 24회 중 0회였다. 간헐적이고 원인은 모른다. 같은 코드를 `colab exec`로 실행하면 정상이고, 남은 차이는 CLI의 클라이언트 식별 헤더뿐이다. 이 헤더는 흉내 내지 않는다(googlecolab에 문의할 예정).
   - 복구: Colab의 jupyter-server는 같은 `session_id`로 다시 붙으면, 끊긴 동안 쌓인 메시지를 재전송한다(강제 끊김 실측: 0.3초 안에 재전송).
@@ -121,7 +121,7 @@ python3 -m venv .venv
 # 선택: torch·numpy가 있어야 하는 tests/test_frontend.py 테스트 9개는 없으면 건너뛴다([dev]에 없다)
 .venv/bin/pip install numpy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
 
-# 테스트 (현재 68개)
+# 테스트 (현재 70개)
 .venv/bin/pytest
 
 # 런타임 실행 (출력되는 URL/Token을 LMS에 등록)
@@ -265,10 +265,15 @@ python3 -m venv .venv
   - 원인은 `header.session`과 `session_id`가 서로 다른 테스트 스크립트였다(3장). Colab CLI 소스(`jupyter_kernel_client` 0.9.0)도 비교했다: `POST /api/kernels {"name","path"}`, WS 헤더에 프록시 토큰과 식별 헤더, 60초 WS ping, 같은 session 값
   - 계약 제안(LMS 세션): Colab에서는 WS URL `session_id`와 메시지 `header.session`이 같아야 한다는 점을 계약 2장에 적는다. 지금 프론트는 이미 지킨다
 
+- 2026-11-05 (WSL) Colab 커널에 헬퍼 복사
+  - 브리지(`bridge.HelperInstaller`)는 시작할 때 표준 Contents API(`PUT /api/contents`)로 계약 4장 헬퍼 파일만 Colab VM에 복사한다: `lms_kernel/{__init__,frontend,viz}.py`, `lms_viz/__init__.py`. 대상은 `/env/python`이 있으면 거기, 없으면 Contents 루트(`/`)다. 시작할 때 실패하면 `POST /api/kernels` 직전에 다시 시도한다. 브라우저에는 `/api/contents`를 열지 않는다
+  - 실측(T4): 루트로 복사됐다. 브리지 경유로 `info()`(lms_kernel 0.3.0, contract 0.8), `variables()`(torch Tensor 포함), `env()`가 동작했다. 학생이 `os.chdir('/content')`를 한 뒤에도 `import lms_viz`가 된다
+  - 헬퍼 버전은 브리지를 실행한 `lms_kernel`과 항상 같다. 학생이 Colab에 따로 설치할 것은 없다
+  - 테스트: 가짜 업스트림의 `root_dir`을 임시 폴더로 고정했다(저장소에 쓰지 않도록). 복사한 파일만으로 `python -I -S`에서 import와 `info()`가 되는지 확인한다. 편집 설치(editable)는 meta_path로 우선하므로 커널 안 import로는 확인할 수 없다
+
 ### 다음 작업 (WSL, 우선순위 순)
 1. **Colab 안내 범위**: 결정됨(2026-11-05, 사용자). Colab 안내는 지금처럼 유지한다. 같은 날 의심했던 커널 유실은 테스트 스크립트 때문이었다(3장)
 2. **Colab 브라우저 확인**: https://lms.132-145-125-71.sslip.io/courses/transformer/1 과 `/runtime-test`에서 `lms-runtime --colab` URL/Token으로 확인한다
-3. **Colab 쪽 `lms_kernel` 설치 방식**: 계약 4장 "헬퍼 버전 확인"과 함께 LMS 세션과 정한다. 지금은 Colab 커널에 `lms_kernel`이 없어서 프론트의 `info()`·`variables()` 호출이 `ModuleNotFoundError`로 끝난다
 
 개선 후보 (2026-11-03 정리, 우선순위 순. 계약을 건드리는 것은 LMS 세션과 먼저 합의한다)
 8. **googlecolab 이슈 후속**: 사용자가 제출한 두 이슈(로그의 자격증명, 서드파티 장시간 WS)의 URL을 3장에 적고, 답변에 따라 colab.log 경고와 WS 끊김 대책을 갱신한다

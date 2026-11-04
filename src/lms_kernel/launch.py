@@ -94,7 +94,7 @@ def print_registration(port: int, token: str) -> None:
 
 
 def run_colab_bridge(args, token: str) -> int:
-    from .bridge import keep_fresh, probe, start, stop_when_idle
+    from .bridge import HelperInstaller, keep_fresh, probe, start, stop_when_idle
     from .colab_session import (
         PINNED_CLI_VERSION, ColabSession, SessionFormatError, SessionGone, cli_version, loose_config_dir,
     )
@@ -150,9 +150,11 @@ def run_colab_bridge(args, token: str) -> int:
                 file=sys.stderr,
                 flush=True,
             )
+        installer = HelperInstaller(session)
         try:
             server = start(
                 args.origin, args.port, token, session,
+                helper_installer=installer,
                 upstream_reconnect=not args.no_upstream_reconnect,
                 debug_drop_upstream_after=args.debug_drop_upstream_after,
                 debug_drop_reply_once=args.debug_drop_reply_once,
@@ -161,6 +163,7 @@ def run_colab_bridge(args, token: str) -> int:
             print(f"포트 {args.port}를 열 수 없습니다: {e.strerror}", file=sys.stderr)
             return 1
         print(f"Colab 런타임에 연결했습니다 (세션 '{args.colab}', {hw}).", flush=True)
+        await installer.ensure()
         idle = args.idle_timeout
         idle_text = COLAB_IDLE_ON.format(minutes=idle) if idle > 0 else COLAB_IDLE_OFF
         print(COLAB_NOTICE.format(session=args.colab, idle=idle_text), flush=True)

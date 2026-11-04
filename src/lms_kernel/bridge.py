@@ -12,7 +12,9 @@ without ``--colab``. The bridge:
 - drops Colab-only kernel messages (``colab_request`` ...),
 - turns an unreachable or terminated Colab runtime into REST errors / WebSocket close,
 - returns the Colab VM with `colab stop` once every kernel has been idle long enough
-  (contract 2.1; Colab bills the VM assignment, not kernels).
+  (contract 2.1; Colab bills the VM assignment, not kernels),
+- copies the kernel helpers (``lms_kernel.frontend``/``viz``, ``lms_viz``, contract 4)
+  onto the Colab VM through the standard Contents API, so they match this bridge's version.
 
 Neither the LMS token nor the Colab proxy token is ever logged.
 """
@@ -24,7 +26,9 @@ import hmac
 import json
 import logging
 import struct
+import sys
 import time
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urlencode, urlsplit
 
@@ -63,6 +67,19 @@ MSG_GONE = "Colab 런타임이 종료되었습니다. `colab new`로 세션을 �
 MSG_UNREACHABLE = "Colab 런타임에 연결할 수 없습니다. 런타임이 종료되었거나 네트워크에 문제가 있습니다."
 
 ID = r"[A-Za-z0-9_-]+"
+
+# Contract 4 helpers copied to the Colab VM. Only these files: they need nothing but the
+# standard library, packaging and IPython (all on Colab); the rest of lms_kernel (server,
+# bridge) never runs in the kernel. /env/python is on the Colab kernel's sys.path ahead of
+# site-packages regardless of the working directory; "" (the Contents API root) is the
+# fallback for images without it.
+HELPER_FILES = (
+    ("lms_kernel", "__init__.py"),
+    ("lms_kernel", "frontend.py"),
+    ("lms_kernel", "viz.py"),
+    ("lms_viz", "__init__.py"),
+)
+HELPER_TARGETS = ("env/python", "")
 
 
 class BridgeError(web.HTTPError):
@@ -182,6 +199,10 @@ class RestHandler(_Auth, web.RequestHandler):
         self.finish()
 
     async def _forward(self, *args):
+        if self.request.method == "POST" and self.request.path == "/api/kernels":
+            installer = self._settings().get("helper_installer")
+            if installer is not None:
+                await installer.ensure()  # retry if it failed at startup; no-op once done
         try:
             info = await self.colab.current()
         except SessionGone:
@@ -456,6 +477,82 @@ def _log_request(handler: web.RequestHandler):
     log.log(level, "%s %s %d %.0fms", req.method, req.path, status, 1000.0 * req.request_time())
 
 
+class HelperInstaller:
+    """Copies the contract 4 helpers to the Colab VM once (standard ``PUT /api/contents``).
+
+    Not exposed to the browser: the bridge relays only the contract paths.
+    """
+
+    def __init__(self, colab_session: ColabSession):
+        self.colab = colab_session
+        self.done = False
+        self.target: Optional[str] = None
+        self._lock = asyncio.Lock()
+
+    @staticmethod
+    def _sources() -> list[tuple[str, str]]:
+        import lms_kernel
+
+        src = Path(lms_kernel.__file__).resolve().parent.parent
+        return [(f"{pkg}/{name}", (src / pkg / name).read_text(encoding="utf-8")) for pkg, name in HELPER_FILES]
+
+    async def _contents(self, info, method: str, path: str, body: Optional[dict] = None) -> Optional[int]:
+        req = httpclient.HTTPRequest(
+            f"{info.url}/api/contents/{path}".rstrip("/"),
+            method=method,
+            headers={PROXY_TOKEN_HEADER: info.token, "Accept": "application/json",
+                     **({"Content-Type": "application/json"} if body is not None else {})},
+            body=json.dumps(body) if body is not None else None,
+            follow_redirects=False,
+            connect_timeout=CONNECT_TIMEOUT,
+            request_timeout=REQUEST_TIMEOUT,
+        )
+        try:
+            resp = await httpclient.AsyncHTTPClient().fetch(req, raise_error=False)
+        except Exception:
+            return None
+        return None if resp.code == 599 else resp.code
+
+    async def ensure(self) -> bool:
+        if self.done:
+            return True
+        async with self._lock:
+            if self.done:
+                return True
+            try:
+                info = await self.colab.current()
+            except Exception:
+                return False
+            for target in HELPER_TARGETS:
+                if target and await self._contents(info, "GET", f"{target}?content=0") != 200:
+                    continue
+                prefix = f"{target}/" if target else ""
+                ok = True
+                for pkg in ("lms_kernel", "lms_viz"):
+                    if await self._contents(info, "PUT", prefix + pkg, {"type": "directory"}) not in (200, 201):
+                        ok = False
+                for path, text in self._sources() if ok else []:
+                    if await self._contents(info, "PUT", prefix + path,
+                                            {"type": "file", "format": "text", "content": text}) not in (200, 201):
+                        ok = False
+                        break
+                if ok:
+                    self.done, self.target = True, "/" + target
+                    from lms_kernel import __version__
+
+                    print(f"Colab 런타임에 LMS 헬퍼(lms_kernel {__version__})를 설치했습니다 ({self.target}).",
+                          flush=True)
+                    return True
+            log.warning("could not copy the kernel helpers to the Colab runtime")
+            print(
+                "[lms-runtime] Colab 런타임에 LMS 헬퍼를 설치하지 못했습니다. 변수 인스펙터·환경 점검이 동작하지 않을 수 "
+                "있습니다. 새 커널을 만들 때 다시 시도합니다.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return False
+
+
 def make_app(
     origin: str,
     token: str,
@@ -463,6 +560,7 @@ def make_app(
     upstream_reconnect: bool = True,
     debug_drop_upstream_after: Optional[float] = None,
     debug_drop_reply_once: bool = False,
+    helper_installer: Optional[HelperInstaller] = None,
 ) -> web.Application:
     kernel = rf"/api/kernels/(?:{ID})"
     return web.Application(
@@ -479,6 +577,7 @@ def make_app(
         upstream_reconnect=upstream_reconnect,
         debug_drop_upstream_after=debug_drop_upstream_after,
         reply_dropper=ReplyDropper() if debug_drop_reply_once else None,
+        helper_installer=helper_installer,
         log_function=_log_request,
         websocket_max_message_size=MAX_MESSAGE_SIZE,
         websocket_ping_interval=None,
@@ -493,11 +592,12 @@ def start(
     upstream_reconnect: bool = True,
     debug_drop_upstream_after: Optional[float] = None,
     debug_drop_reply_once: bool = False,
+    helper_installer: Optional[HelperInstaller] = None,
 ):
     """Bind 127.0.0.1:<port> (raises OSError if taken). Call inside a running event loop."""
     app = make_app(
         origin, token, colab_session, upstream_reconnect, debug_drop_upstream_after,
-        debug_drop_reply_once,
+        debug_drop_reply_once, helper_installer,
     )
     return app.listen(port, address="127.0.0.1")
 

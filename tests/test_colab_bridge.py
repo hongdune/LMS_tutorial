@@ -45,7 +45,7 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _start_upstream():
+def _start_upstream(root_dir):
     port = _free_port()
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(TESTS), os.environ.get("PYTHONPATH", "")])}
     proc = subprocess.Popen(
@@ -56,6 +56,7 @@ def _start_upstream():
             "--ServerApp.identity_provider_class=fake_colab_proxy.FakeColabProxyIdentityProvider",
             # Fake upstream only; lets the suite run in a root-only WSL like lms-runtime does.
             "--ServerApp.allow_root=True",
+            f"--ServerApp.root_dir={root_dir}",  # Contents API writes go here, never the repo
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -139,8 +140,13 @@ def _write(path: Path, data):
 
 
 @pytest.fixture(scope="module")
-def upstream():
-    proc, base = _start_upstream()
+def upstream_root(tmp_path_factory):
+    return tmp_path_factory.mktemp("colab-vm")
+
+
+@pytest.fixture(scope="module")
+def upstream(upstream_root):
+    proc, base = _start_upstream(upstream_root)
     yield base
     proc.terminate()
     proc.wait(timeout=10)
@@ -470,8 +476,8 @@ def test_idle_stop_retries_when_cli_fails(make_bridge, upstream, capfd):
     assert f"colab stop -s {SESSION}" in capfd.readouterr().err
 
 
-def test_upstream_down_gives_502_and_closes_websocket(make_bridge):
-    proc, base = _start_upstream()
+def test_upstream_down_gives_502_and_closes_websocket(make_bridge, tmp_path):
+    proc, base = _start_upstream(tmp_path)
     try:
         b = make_bridge(_session_entry(base, PROXY_TOKEN), min_refresh_interval=3600)
         b.call(b.session.refresh())
@@ -489,13 +495,13 @@ def test_upstream_down_gives_502_and_closes_websocket(make_bridge):
             proc.kill()
 
 
-def test_hung_upstream_closes_websocket_via_heartbeat(make_bridge, monkeypatch):
+def test_hung_upstream_closes_websocket_via_heartbeat(make_bridge, monkeypatch, tmp_path):
     import signal
     import lms_kernel.bridge as bridge_mod
 
     monkeypatch.setattr(bridge_mod, "HEARTBEAT_INTERVAL", 1.0)
     monkeypatch.setattr(bridge_mod, "HEARTBEAT_TIMEOUT", 1.0)
-    proc, base = _start_upstream()
+    proc, base = _start_upstream(tmp_path)
     try:
         b = make_bridge(_session_entry(base, PROXY_TOKEN), min_refresh_interval=3600)
         b.call(b.session.refresh())
@@ -787,6 +793,62 @@ def test_cli_prints_registration_and_rejects_unknown_session(tmp_path, upstream)
     finally:
         proc.terminate()
         proc.wait(timeout=10)
+
+
+# --- kernel helpers on the Colab VM (contract 4) -------------------------------------------
+
+def test_helpers_are_copied_and_importable_in_upstream_kernel(make_bridge, upstream, upstream_root):
+    import shutil
+    from lms_kernel import __version__
+    from lms_kernel.bridge import HELPER_FILES, HelperInstaller
+
+    for pkg in ("lms_kernel", "lms_viz", "env"):
+        shutil.rmtree(upstream_root / pkg, ignore_errors=True)
+    b = make_bridge(_session_entry(upstream, PROXY_TOKEN))
+    b.call(b.session.refresh())
+    inst = HelperInstaller(b.session)
+    assert b.call(inst.ensure()) is True and inst.target == "/"  # no env/python: root fallback
+    src = Path(__import__("lms_kernel").__file__).resolve().parent.parent
+    for pkg, name in HELPER_FILES:
+        assert (upstream_root / pkg / name).read_text() == (src / pkg / name).read_text()
+    assert not (upstream_root / "lms_kernel" / "bridge.py").exists()  # helpers only
+
+    # The copied files alone are enough: no site-packages (-S), only the copy on sys.path.
+    # (A kernel here would import this test environment's editable install instead.)
+    code = ("import sys; sys.path.insert(0, sys.argv[1]); import lms_kernel.frontend as f, lms_viz; "
+            "print(f.__file__); print(f.info().data)")
+    out = subprocess.run([sys.executable, "-I", "-S", "-c", code, str(upstream_root)],
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.splitlines()[0] == str(upstream_root / "lms_kernel" / "frontend.py")
+    assert f"'lms_kernel': '{__version__}'" in out.stdout
+    for pkg in ("lms_kernel", "lms_viz"):
+        shutil.rmtree(upstream_root / pkg, ignore_errors=True)
+
+
+def test_helpers_go_to_env_python_and_retry_on_kernel_create(make_bridge, upstream, upstream_root):
+    import shutil
+    from lms_kernel.bridge import HelperInstaller
+
+    (upstream_root / "env" / "python").mkdir(parents=True, exist_ok=True)
+    try:
+        b = make_bridge(_session_entry(upstream, PROXY_TOKEN))
+        b.call(b.session.refresh())
+        inst = HelperInstaller(b.session)
+        b.server.stop()  # restart the bridge app with the installer wired in
+        b.server = b.call(_start_with_installer(b, inst))
+        assert not inst.done
+        kid = _new_kernel(b.base)  # POST /api/kernels triggers the copy
+        assert inst.done and inst.target == "/env/python"
+        assert (upstream_root / "env" / "python" / "lms_viz" / "__init__.py").exists()
+        assert not (upstream_root / "lms_viz").exists()
+        requests.delete(f"{b.base}/api/kernels/{kid}", headers=_auth(), timeout=30)
+    finally:
+        shutil.rmtree(upstream_root / "env", ignore_errors=True)
+
+
+async def _start_with_installer(b, inst):
+    return start(ORIGIN, b.port, LMS_TOKEN, b.session, helper_installer=inst)
 
 
 # --- Colab CLI version / session file format ---------------------------------------------
