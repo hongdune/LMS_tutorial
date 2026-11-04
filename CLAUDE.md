@@ -89,12 +89,14 @@ OCI 인스턴스 (LMS 저장소)                   학생 PC: Windows + WSL (이
 - `colab stop` 직후 사용률 0.00/hr, 할당 0개가 됐다. 크레딧을 멈추는 방법은 VM 반납(`colab stop`)뿐이다
 - 확인하지 못한 것: Colab이 오래 방치된 할당을 스스로 회수하는지(수 시간 관찰이 필요하다)
 - 자동 반납 실측(브리지 `--idle-timeout 2`, T4 2회): 쉬기 시작한 지 약 3분 뒤(2분 + 60초 조회 간격) `colab stop`이 실행됐다. 이후 REST는 503을 돌려줬고 `colab usage`는 0.00/hr, 서버 쪽 세션은 0개였다
-- **API로 만든 커널이 첫 실행 직후 사라짐 (2026-11-05, 미해결)**: 새 T4 세션에서 `POST /api/kernels` → WS로 셀 1개를 실행하면, 출력과 idle은 정상으로 왔지만 곧바로 문제가 생겼다
-  - 브리지 경유 2회: 업스트림 WS가 바로 닫혔고, 커널 목록이 `[]`가 됐다
-  - 브리지 없이 직접 2회: 1회는 `GET /api/kernels`가 JSON이 아닌 응답을 돌려줬다. 1회는 연결 수 0이었고, 17초 뒤 WS가 닫혀 두 번째 셀이 실패했다
-  - 같은 날 `colab exec`로는 20초 간격으로 두 번 실행해도 같은 커널(같은 pid)이 유지됐다. 연결 수는 1이었다
-  - 3장 "WS 끊김"과 같은 계열로 보인다(남은 차이는 CLI의 클라이언트 식별 헤더). 11-03보다 훨씬 심하다. 이 상태로는 Colab 모드에서 두 번째 셀부터 실행되지 않을 수 있다
-  - 그래서 쉬는 커널의 `last_activity`가 스스로 바뀌는지는 이번에도 확인하지 못했다
+- **Colab 프록시는 `header.session`이 WS URL의 `session_id`와 다른 `execute_request`를 받으면 연결을 끊는다 (2026-11-05 확인)**
+  - 증상: 실행 결과는 오지만 0.2초 뒤 close 프레임 없이 TCP가 닫힌다. `kernel_info_request`로는 끊기지 않는다. 클라이언트 라이브러리(tornado, websocket-client)와 핸드셰이크 헤더(Origin, User-Agent, Accept-Encoding)는 관계없다
+  - 재현: 같은 세션에서 값이 같으면 2회 연속 실행이 5/5 유지됐고, 다르면 2/2 끊겼다
+  - LMS 프론트는 `@jupyterlab/services` 7.6.5의 `requestExecute`만 쓴다. 이 라이브러리는 URL `session_id`와 모든 메시지 `session`에 같은 `_clientId`를 쓰므로 해당하지 않는다
+  - 같은 날 "첫 실행 직후 커널이 사라진다"고 본 현상은 테스트 스크립트가 두 값을 따로 만들어서 생겼다. 브리지와 Colab의 문제가 아니었다. 모니터(새 세션 5회 × 우리 방식·CLI 라이브러리·`colab exec`)에서는 모두 유지됐다
+  - 11-03의 간헐적 "WS 끊김"과 관계있는지는 모른다(그때 스크립트가 값을 어떻게 만들었는지 남아 있지 않다)
+  - 프록시가 가끔 `POST /api/kernels`에 500이나 JSON이 아닌 응답을 준다(커널을 많이 만들고 지운 세션에서 자주 나왔다). 다시 시도하면 201이었다
+- 쉬는 커널의 `last_activity` (브리지 경유, T4, WS 연결 유지, 연결 수 1): 4분 동안 같은 값이었다. `--idle-timeout 3`에서 마지막 활동 4분 뒤 반납됐다. 자동 반납은 실제 Colab 조건에서도 동작한다
 
 위험:
 - "notebook UI 우회"·"원격 제어" 제한은 **컴퓨트 유닛 잔액이 0보다 클 때만** 풀린다. Pro+라도 월 할당량을 다 쓰면 제한 대상이 되고, 런타임이 예고 없이 종료될 수 있다.
@@ -244,7 +246,7 @@ python3 -m venv .venv
     - 반납은 `ColabSession.stop()`(`colab stop -s <세션>`)으로 한다. 실패하면 경고를 출력하고 5분 뒤 다시 시도한다. 반납한 뒤 REST는 503이고, 열린 WS는 heartbeat(30초) 안에 1011로 닫힌다
   - 시작 안내: 과금 단위(VM), 자동 반납 시간, Colab 정책에 따른 종료 가능성. 반납하면 다시 시작하는 방법을 출력한다
   - 테스트: 가짜 CLI에 `stop` 추가. 유휴 반납과 503, busy 동안 대기(WS가 열려 있어도 반납), 활동 시 타이머 재시작, CLI 실패 시 재시도
-  - 실측: 자동 반납과 크레딧 중지는 확인했다. 쉬는 커널의 `last_activity`는 커널 유실 때문에 확인하지 못했다(3장, 다음 작업 0번과 0-1번)
+  - 실측: 자동 반납, 크레딧 중지, 쉬는 커널의 `last_activity` 고정을 확인했다(3장)
 
 - 2026-11-05 (WSL) torch 없는 환경의 테스트
   - `tests/test_frontend.py`: torch·numpy가 필요한 테스트는 `_require(...)`(find_spec)로 건너뛴다. torch 없음 테스트의 `env` 대상은 numpy에서 `packaging`(필수 의존성)으로 바꿨다
@@ -259,10 +261,12 @@ python3 -m venv .venv
   - 지금까지는 프론트가 접속 직후 부르는 `info()`(silent)의 응답이 버려져서 첫 셀 누락이 재현되지 않았다. 이제 `execute_input`을 처음 보낸 실행(=silent가 아닌 첫 실행)을 대상으로 한다. 커널은 silent 요청에는 `execute_input`을 보내지 않는다
   - 브라우저 확인 절차(LMS 95a346b, "첫 셀: 약 8초 뒤 결과 일부 누락")는 원래 의도대로 다시 맞는다. LMS 세션에 알릴 것
 
+- 2026-11-05 (WSL) Colab 커널 유실 원인 확인
+  - 원인은 `header.session`과 `session_id`가 서로 다른 테스트 스크립트였다(3장). Colab CLI 소스(`jupyter_kernel_client` 0.9.0)도 비교했다: `POST /api/kernels {"name","path"}`, WS 헤더에 프록시 토큰과 식별 헤더, 60초 WS ping, 같은 session 값
+  - 계약 제안(LMS 세션): Colab에서는 WS URL `session_id`와 메시지 `header.session`이 같아야 한다는 점을 계약 2장에 적는다. 지금 프론트는 이미 지킨다
+
 ### 다음 작업 (WSL, 우선순위 순)
-0. **Colab 커널 유실 조사 (최우선)**: 3장 "API로 만든 커널이 첫 실행 직후 사라짐". 같은 순서를 다른 날·다른 리전에서 재현하는지, CPU 런타임에서도 그런지 확인한다. 연결 수가 0으로 보이는 이유도 본다. googlecolab 문의에 이 결과를 덧붙인다
-0-1. **쉬는 Colab 커널의 `last_activity`**: 커널이 유지되는 상태에서 몇 분 동안 값이 그대로인지 확인한다. 바뀌면 자동 반납이 일어나지 않는다. 자동 반납 자체(반납과 0.00/hr)는 실측으로 확인했다
-1. **Colab 안내 범위**: 결정됨(2026-11-05, 사용자). 커널 유실 문제가 있어도 Colab 안내는 지금처럼 유지한다. 0번 결과는 LMS 세션에 알리고, 복구 화면 문구로 대응한다
+1. **Colab 안내 범위**: 결정됨(2026-11-05, 사용자). Colab 안내는 지금처럼 유지한다. 같은 날 의심했던 커널 유실은 테스트 스크립트 때문이었다(3장)
 2. **Colab 브라우저 확인**: https://lms.132-145-125-71.sslip.io/courses/transformer/1 과 `/runtime-test`에서 `lms-runtime --colab` URL/Token으로 확인한다
 3. **Colab 쪽 `lms_kernel` 설치 방식**: 계약 4장 "헬퍼 버전 확인"과 함께 LMS 세션과 정한다. 지금은 Colab 커널에 `lms_kernel`이 없어서 프론트의 `info()`·`variables()` 호출이 `ModuleNotFoundError`로 끝난다
 

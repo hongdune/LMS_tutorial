@@ -588,24 +588,42 @@ def _send_execute(ws, code):
     return req["header"]["msg_id"]
 
 
-def _collect(ws, msg_id, until_first_stream=False):
-    """Messages for msg_id until idle (True) or the socket closes (False)."""
-    seen = []
-    while True:
-        try:
-            raw = ws.recv()
-        except websocket.WebSocketConnectionClosedException:
-            return seen, False
-        if not raw:
-            return seen, False
-        m = json.loads(raw)
-        if m.get("parent_header", {}).get("msg_id") != msg_id:
-            continue
-        seen.append(m)
-        if until_first_stream and m["msg_type"] == "stream":
-            return seen, True
-        if m["msg_type"] == "status" and m["content"]["execution_state"] == "idle":
-            return seen, True
+def _collect(ws, msg_id, until_first_stream=False, reply_grace=3.0):
+    """Messages for msg_id until idle and execute_reply (True) or the socket closes (False).
+
+    idle (iopub) and execute_reply (shell) travel on different channels, so either may
+    come first, especially in a replay after reconnecting; once idle is in, wait up to
+    `reply_grace` seconds for the reply."""
+    seen, idle_at = [], None
+    try:
+        while True:
+            if idle_at is not None:
+                left = reply_grace - (time.time() - idle_at)
+                if left <= 0:
+                    return seen, True
+                ws.settimeout(left)
+            try:
+                raw = ws.recv()
+            except websocket.WebSocketTimeoutException:
+                if idle_at is not None:
+                    return seen, True
+                raise
+            except websocket.WebSocketConnectionClosedException:
+                return seen, idle_at is not None
+            if not raw:
+                return seen, idle_at is not None
+            m = json.loads(raw)
+            if m.get("parent_header", {}).get("msg_id") != msg_id:
+                continue
+            seen.append(m)
+            if until_first_stream and m["msg_type"] == "stream":
+                return seen, True
+            if m["msg_type"] == "status" and m["content"]["execution_state"] == "idle":
+                idle_at = time.time()
+            if idle_at is not None and any(x["msg_type"] == "execute_reply" for x in seen):
+                return seen, True
+    finally:
+        ws.settimeout(30)
 
 
 def _printed(msgs):

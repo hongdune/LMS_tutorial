@@ -84,12 +84,38 @@ def _execute(ws, code, wait_extra=3.0, silent=False):
     return types
 
 
+def _wait_ready(ws, limit=60):
+    """Send kernel_info_request until one is answered, like @jupyterlab/services does
+    before it sends anything else (a slow kernel on CI may miss the first request)."""
+    deadline = time.time() + limit
+    while time.time() < deadline:
+        mid = uuid.uuid4().hex
+        ws.send(json.dumps({
+            "header": {"msg_id": mid, "msg_type": "kernel_info_request", "username": "t",
+                       "session": uuid.uuid4().hex, "version": "5.3", "date": ""},
+            "parent_header": {}, "metadata": {}, "channel": "shell", "content": {},
+        }))
+        ws.settimeout(2)
+        try:
+            while True:
+                m = json.loads(ws.recv())
+                if (m.get("parent_header", {}).get("msg_id") == mid
+                        and m["msg_type"] == "kernel_info_reply"):
+                    return
+        except websocket.WebSocketTimeoutException:
+            continue
+        finally:
+            ws.settimeout(60)
+    pytest.fail("kernel never answered kernel_info_request")
+
+
 def check_first_reply_dropped(base, ws_base, headers, ws_kw, token=TOKEN):
     r = requests.post(f"{base}/api/kernels", headers=headers, json={"name": "python3"}, timeout=60)
     kid = r.json()["id"]
     try:
         ws = websocket.create_connection(
             f"{ws_base}/api/kernels/{kid}/channels?session_id=s1&token={token}", timeout=60, **ws_kw)
+        _wait_ready(ws)
         # The LMS frontend calls info() (silent) right after connecting: not the one dropped.
         helper = _execute(ws, "", silent=True)
         assert ("execute_reply", None) in helper and ("status", "idle") in helper
