@@ -116,7 +116,7 @@ OCI 인스턴스 (LMS 저장소)                   학생 PC: Windows + WSL (이
 # Python 환경 (최초 1회, Python 3.10 이상)
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-# tests/test_frontend.py는 torch·numpy가 있어야 한다(필수 의존성이 아니라 [dev]에 없다)
+# 선택: torch·numpy가 있어야 하는 tests/test_frontend.py 테스트 9개는 없으면 건너뛴다([dev]에 없다)
 .venv/bin/pip install numpy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
 
 # 테스트 (현재 63개)
@@ -246,6 +246,10 @@ python3 -m venv .venv
   - 테스트: 가짜 CLI에 `stop` 추가. 유휴 반납과 503, busy 동안 대기(WS가 열려 있어도 반납), 활동 시 타이머 재시작, CLI 실패 시 재시도
   - 실측: 자동 반납과 크레딧 중지는 확인했다. 쉬는 커널의 `last_activity`는 커널 유실 때문에 확인하지 못했다(3장, 다음 작업 0번과 0-1번)
 
+- 2026-11-05 (WSL) torch 없는 환경의 테스트
+  - `tests/test_frontend.py`: torch·numpy가 필요한 테스트는 `_require(...)`(find_spec)로 건너뛴다. torch 없음 테스트의 `env` 대상은 numpy에서 `packaging`(필수 의존성)으로 바꿨다
+  - torch·numpy 없는 venv: 54 passed, 9 skipped. 전체 환경: 63 passed
+
 ### 다음 작업 (WSL, 우선순위 순)
 0. **Colab 커널 유실 조사 (최우선)**: 3장 "API로 만든 커널이 첫 실행 직후 사라짐". 같은 순서를 다른 날·다른 리전에서 재현하는지, CPU 런타임에서도 그런지 확인한다. 연결 수가 0으로 보이는 이유도 본다. googlecolab 문의에 이 결과를 덧붙인다
 0-1. **쉬는 Colab 커널의 `last_activity`**: 커널이 유지되는 상태에서 몇 분 동안 값이 그대로인지 확인한다. 바뀌면 자동 반납이 일어나지 않는다. 자동 반납 자체(반납과 0.00/hr)는 실측으로 확인했다
@@ -254,7 +258,6 @@ python3 -m venv .venv
 3. **Colab 쪽 `lms_kernel` 설치 방식**: 계약 4장 "헬퍼 버전 확인"과 함께 LMS 세션과 정한다. 지금은 Colab 커널에 `lms_kernel`이 없어서 프론트의 `info()`·`variables()` 호출이 `ModuleNotFoundError`로 끝난다
 
 개선 후보 (2026-11-03 정리, 우선순위 순. 계약을 건드리는 것은 LMS 세션과 먼저 합의한다)
-4. **테스트의 torch 의존 정리**: `tests/test_frontend.py`의 torch 있음 테스트는 torch가 없으면 실패한다. `pytest.importorskip("torch")`로 건너뛰게 하거나, `[test-torch]` 같은 별도 extra를 만든다. 지금은 위 "명령어"의 수동 설치로 해결한다
 5. **CI**: GitHub Actions가 없다. Ubuntu + Python 3.10/3.12, CPU torch로 `pytest`를 돌린다. Colab 실측은 CI 대상이 아니다(가짜 업스트림 테스트만)
 6. **Colab CLI 버전 확인**: README는 0.7.5로 고정해 설치하지만, `lms-runtime --colab`은 버전을 확인하지 않는다. 시작할 때 `colab version`(또는 venv의 `importlib.metadata`)을 읽어 0.7.5가 아니면 경고만 출력한다. `sessions.json` 형식이 바뀌면 브리지가 조용히 503을 내므로, 읽기 실패 시 안내 문구도 넣는다
 7. **`--debug-drop-reply-once`와 `info()`**: 지금은 프론트가 접속 직후 부르는 `info()`(silent 실행)의 응답이 버려진다. silent 요청은 건너뛰고 학생의 첫 셀을 버리도록 바꿀지 정한다. 진단 옵션이라 계약은 바뀌지 않지만, 브라우저 확인 절차(LMS 95a346b)가 지금 동작에 맞춰져 있으면 LMS 세션에 알린다

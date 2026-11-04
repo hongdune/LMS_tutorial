@@ -1,6 +1,7 @@
 """lms_kernel.frontend and lms_viz in a real ipykernel, called exactly as runtime
 contract 4.1 says: empty code, silent, user_expressions."""
 
+import importlib.util
 import json
 import queue
 
@@ -8,6 +9,14 @@ import pytest
 from jupyter_client.manager import start_new_kernel
 
 HELPER = "__import__('lms_kernel.frontend').frontend.{}"
+
+
+def _require(*modules):
+    """Skip unless the optional packages are installed (torch/numpy are not in [dev];
+    the kernel runs on this same interpreter)."""
+    missing = [m for m in modules if importlib.util.find_spec(m) is None]
+    if missing:
+        pytest.skip(f"optional package not installed: {', '.join(missing)}")
 
 
 class Kernel:
@@ -109,6 +118,7 @@ def test_info(kernel):
 
 
 def test_env_with_torch(kernel):
+    _require('torch', 'numpy')
     data = _json(kernel.helper('env(["torch>=2.2", "numpy", "no-such-package-xyz", "torch<1", "bad req ~~"])')[0])
     assert data["python"].count(".") == 2 and data["platform"]
     pk = data["packages"]
@@ -127,7 +137,7 @@ def test_env_with_torch(kernel):
 
 
 def test_env_without_torch(kernel_no_torch):
-    data = _json(kernel_no_torch.helper('env(["numpy"])')[0])
+    data = _json(kernel_no_torch.helper('env(["packaging"])')[0])  # always installed
     assert data["torch"] is None
     assert data["packages"][0]["ok"] is True
 
@@ -172,6 +182,7 @@ _hidden = 1
 
 @pytest.fixture(scope="module")
 def populated(kernel):
+    _require('torch', 'numpy')
     reply, _ = kernel.run(SETUP)
     assert reply["status"] == "ok", reply
     data = _json(kernel.helper("variables()")[0])
@@ -224,6 +235,7 @@ def test_variables_truncates_at_200(kernel):
 
 
 def test_variables_without_torch(kernel_no_torch):
+    _require('numpy')
     kernel_no_torch.run("import numpy as np\narr = np.zeros(4)\nx = 1")
     data = _json(kernel_no_torch.helper("variables()")[0])
     v = {x["name"]: x for x in data["variables"]}
@@ -286,6 +298,7 @@ def test_viz_heatmap_nan_and_fallback(kernel):
 
 
 def test_viz_heatmap_crops_large_tensor(kernel):
+    _require('torch')
     _, msgs = kernel.run("import torch, lms_viz\nlms_viz.heatmap(torch.rand(300, 260))")
     data = _displays(msgs)[0]["data"]["application/vnd.lms.heatmap+json"]
     assert len(data["data"]) == 256 and len(data["data"][0]) == 256 and data["truncated"] is True
@@ -324,6 +337,7 @@ def test_viz_line_limits(kernel):
 
 
 def test_viz_scatter(kernel):
+    _require('numpy')
     _, msgs = kernel.run(
         "import numpy as np, lms_viz\n"
         "pts = np.arange(6000, dtype=float)\n"
