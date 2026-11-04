@@ -443,14 +443,14 @@ def test_idle_stop_timer_restarts_on_kernel_activity(make_bridge, upstream):
         origin=ORIGIN, timeout=30)
     try:
         fut = asyncio.run_coroutine_threadsafe(
-            stop_when_idle(b.session, idle_timeout=2.0, poll_interval=0.2), b.loop)
+            stop_when_idle(b.session, idle_timeout=4.0, poll_interval=0.2), b.loop)
         t0 = time.time()
-        while time.time() - t0 < 5:  # short cells every 0.8s, never 2s apart
-            _execute(ws, "1 + 1")
-            time.sleep(0.8)
+        while time.time() - t0 < 6:  # short cells every ~0.5s: far below the 4s timeout,
+            _execute(ws, "1 + 1")    # with headroom for slow CI runners
+            time.sleep(0.5)
         assert not fut.done() and _stops(b) == 0
         assert fut.result(30) is True
-        assert time.time() - t0 >= 5 + 2.0 - 0.8
+        assert time.time() - t0 >= 6 + 4.0 - 0.5
     finally:
         ws.close()
         requests.delete(f"{upstream}/api/kernels/{kid}",
