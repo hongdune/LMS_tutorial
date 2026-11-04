@@ -12,6 +12,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "pytest-timeout>=2.2",
     "requests>=2.31",
     "websocket-client>=1.7",
 ]
@@ -28,3 +29,5 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A hung WebSocket/subprocess wait fails that test (with a traceback) instead of the CI job.
+timeout = 300

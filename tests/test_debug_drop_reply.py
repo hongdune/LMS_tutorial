@@ -76,7 +76,7 @@ def _execute(ws, code, wait_extra=3.0, silent=False):
         if m.get("parent_header", {}).get("msg_id") != mid:
             continue
         types.append((m["msg_type"], m["content"].get("execution_state")))
-        if m["msg_type"] == "stream" or (silent and m["msg_type"] == "status"):
+        if m["msg_type"] == "stream":
             ws.settimeout(wait_extra)
         if ("execute_reply", None) in types and ("status", "idle") in types:
             break

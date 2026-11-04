@@ -27,4 +27,12 @@ jobs:
         run: pip install numpy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
       # Colab is never contacted: bridge tests use a fake upstream and a fake `colab` CLI.
       - name: Test
-        run: pytest -q -rs
+        run: |
+          set -o pipefail
+          pytest -q -rs 2>&1 | tee pytest.log
+      # Job logs need sign-in; annotations are public, so failing test names stay visible.
+      - name: Annotate failures
+        if: failure()
+        run: |
+          grep -E '^(FAILED|ERROR) ' pytest.log | head -20 | sed 's/^/::error title=pytest::/' || true
+          grep -E '^E   ' pytest.log | head -20 | sed 's/^/::error title=pytest detail::/' || true
