@@ -96,7 +96,9 @@ def print_registration(port: int, token: str) -> None:
 
 def run_colab_bridge(args, token: str) -> int:
     from .bridge import keep_fresh, probe, start, stop_when_idle
-    from .colab_session import ColabSession, SessionGone, loose_config_dir
+    from .colab_session import (
+        PINNED_CLI_VERSION, ColabSession, SessionFormatError, SessionGone, cli_version, loose_config_dir,
+    )
 
     if shutil.which(args.colab_bin) is None:
         print(
@@ -106,6 +108,16 @@ def run_colab_bridge(args, token: str) -> int:
         return 1
 
     logging.basicConfig(level=logging.WARNING, format="[lms-runtime] %(message)s")
+    version = cli_version(args.colab_bin)
+    if version != PINNED_CLI_VERSION:
+        found = f"설치된 버전은 {version}입니다" if version else "설치된 버전을 확인하지 못했습니다"
+        print(
+            f"경고: lms-runtime은 Colab CLI {PINNED_CLI_VERSION}에서 검증했습니다({found}). "
+            "세션 파일 형식이 다르면 브리지가 동작하지 않을 수 있습니다.\n"
+            f"  `pip install google-colab-cli=={PINNED_CLI_VERSION}`로 맞추는 것을 권합니다.",
+            file=sys.stderr,
+            flush=True,
+        )
     loose = loose_config_dir(args.colab_config)
     if loose:
         directory, mode = loose
@@ -122,6 +134,9 @@ def run_colab_bridge(args, token: str) -> int:
         print(f"Colab 세션 '{args.colab}' 확인 중...", flush=True)
         try:
             info = await session.refresh()
+        except SessionFormatError as e:
+            print(e, file=sys.stderr, flush=True)
+            return 1
         except SessionGone:
             print(
                 "  `colab sessions`로 세션 이름을 확인하거나 `colab new -s <이름>`으로 새로 만드세요.",

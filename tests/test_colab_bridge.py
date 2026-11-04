@@ -771,6 +771,78 @@ def test_cli_prints_registration_and_rejects_unknown_session(tmp_path, upstream)
         proc.wait(timeout=10)
 
 
+# --- Colab CLI version / session file format ---------------------------------------------
+
+def _fake_cli_venv(tmp_path, version):
+    """A venv-like layout whose bin/colab is the fake CLI and whose dist-info says `version`."""
+    root = tmp_path / "colab-venv"
+    (root / "bin").mkdir(parents=True)
+    exe = root / "bin" / "colab"
+    exe.write_text(Path(FAKE_CLI).read_text())
+    exe.chmod(0o755)
+    meta = root / "lib" / "python3.12" / "site-packages" / f"google_colab_cli-{version}.dist-info"
+    meta.mkdir(parents=True)
+    (meta / "METADATA").write_text(f"Metadata-Version: 2.1\nName: google-colab-cli\nVersion: {version}\n\nbody\n")
+    return str(exe)
+
+
+def test_cli_version_is_read_without_running_the_cli(tmp_path):
+    from lms_kernel.colab_session import cli_version
+
+    exe = _fake_cli_venv(tmp_path, "0.7.5")
+    link = tmp_path / "colab-link"
+    link.symlink_to(exe)  # like ~/.local/bin/colab -> ~/.colab-cli/bin/colab
+    assert cli_version(exe) == "0.7.5"
+    assert cli_version(str(link)) == "0.7.5"
+    assert cli_version(FAKE_CLI) is None
+    assert cli_version("no-such-colab-binary") is None
+
+
+@pytest.mark.parametrize("version, warned", [("0.7.5", False), ("0.8.0", True)])
+def test_warns_when_cli_version_differs(tmp_path, upstream, version, warned):
+    path = tmp_path / "sessions.json"
+    _write(path, _session_entry(upstream, PROXY_TOKEN))
+    exe = [sys.executable, "-m", "lms_kernel.launch", "--origin", ORIGIN, "--colab-config", str(path),
+           "--colab-bin", _fake_cli_venv(tmp_path, version), "--colab", "nope", "--port", str(_free_port())]
+    out = subprocess.run(exe, capture_output=True, text=True, timeout=60)
+    assert out.returncode == 1  # unknown session; the version check comes first
+    assert ("Colab CLI 0.7.5에서 검증" in out.stderr) is warned
+    if warned:
+        assert "0.8.0" in out.stderr
+
+
+def test_unknown_session_file_format_is_reported(tmp_path, upstream):
+    from lms_kernel.colab_session import SessionFormatError, read_session
+
+    path = tmp_path / "sessions.json"
+    _write(path, {SESSION: {"name": SESSION, "endpoint": "x", "proxy": {"url": upstream}}})
+    with pytest.raises(SessionFormatError):
+        read_session(str(path), SESSION)
+    _write(path, [1, 2])
+    with pytest.raises(SessionFormatError):
+        read_session(str(path), SESSION)
+    _write(path, {})
+    assert read_session(str(path), SESSION) is None  # absent is still "gone", not a format error
+
+    _write(path, {SESSION: {"name": SESSION, "endpoint": "x", "proxy": {"url": upstream}}})
+    exe = [sys.executable, "-m", "lms_kernel.launch", "--origin", ORIGIN, "--colab-config", str(path),
+           "--colab-bin", FAKE_CLI, "--colab", SESSION, "--port", str(_free_port())]
+    out = subprocess.run(exe, capture_output=True, text=True, timeout=60)
+    assert out.returncode == 1
+    assert "url·token이 없습니다" in out.stderr and "Traceback" not in out.stderr
+
+
+def test_session_file_format_change_while_running_gives_503(make_bridge, upstream):
+    b = make_bridge(_session_entry(upstream, PROXY_TOKEN))
+    b.call(b.session.refresh())
+    _write(Path(str(b.sessions_path) + ".next"), {SESSION: {"name": SESSION, "proxy": {}}})
+    b.session._info = None  # force a refresh on the next request
+    r = requests.get(f"{b.base}/api/kernels", headers=_auth(Origin=ORIGIN), timeout=30)
+    assert r.status_code == 503
+    assert "0.7.5" in r.json()["message"]
+    assert r.headers["Access-Control-Allow-Origin"] == ORIGIN
+
+
 def test_warns_about_readable_colab_config_dir(tmp_path, upstream):
     from lms_kernel.colab_session import loose_config_dir
 

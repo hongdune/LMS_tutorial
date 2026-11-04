@@ -13,9 +13,11 @@ Tokens are never logged.
 from __future__ import annotations
 
 import asyncio
+import glob
 import json
 import logging
 import os
+import shutil
 import stat
 import sys
 import time
@@ -31,6 +33,38 @@ REFRESH_MARGIN = timedelta(minutes=5)
 # Each `colab` call hits the backend (and the CLI writes a debug log), so throttle.
 MIN_REFRESH_INTERVAL = 30.0
 CLI_TIMEOUT = 120.0
+# The bridge reads sessions.json and runs `status`/`stop`; verified against this version.
+PINNED_CLI_VERSION = "0.7.5"
+
+
+def cli_version(colab_cmd: str) -> Optional[str]:
+    """Installed google-colab-cli version, read from its dist-info without running the CLI
+    (every CLI run writes credentials to colab.log). None if it cannot be found."""
+    exe = shutil.which(colab_cmd)
+    if exe is None:
+        return None
+    candidates = [os.path.dirname(os.path.dirname(os.path.realpath(exe)))]  # venv of the script
+    try:
+        with open(exe, "rb") as f:
+            first = f.readline().decode("utf-8", "replace")
+        if first.startswith("#!") and "python" in first:  # venv of the interpreter it runs on
+            interpreter = first[2:].strip().split()[0]
+            candidates.append(os.path.dirname(os.path.dirname(interpreter)))
+    except OSError:
+        pass
+    for root in candidates:
+        pattern = os.path.join(root, "lib", "python*", "site-packages", "google_colab_cli-*.dist-info", "METADATA")
+        for meta in sorted(glob.glob(pattern)):
+            try:
+                with open(meta, encoding="utf-8") as f:
+                    for line in f:
+                        if line.startswith("Version:"):
+                            return line.split(":", 1)[1].strip()
+                        if not line.strip():
+                            break
+            except OSError:
+                continue
+    return None
 
 
 def loose_config_dir(sessions_path: Optional[str] = None) -> Optional[tuple[str, int]]:
@@ -50,6 +84,17 @@ def loose_config_dir(sessions_path: Optional[str] = None) -> Optional[tuple[str,
 
 class SessionGone(Exception):
     """The Colab session no longer exists (stopped, reclaimed, or never created)."""
+
+
+class SessionFormatError(RuntimeError):
+    """sessions.json is not in the format of the pinned Colab CLI version."""
+
+    def __init__(self, path: str, detail: str):
+        super().__init__(
+            f"Colab CLI 세션 파일({path})을 읽을 수 없습니다: {detail}.\n"
+            f"  lms-runtime은 Colab CLI {PINNED_CLI_VERSION}에서 검증했습니다. "
+            f"CLI 버전이 다르면 `pip install google-colab-cli=={PINNED_CLI_VERSION}`로 맞추세요."
+        )
 
 
 @dataclass(frozen=True)
@@ -87,11 +132,16 @@ def read_session(path: str, name: str) -> Optional[ProxyInfo]:
             # The CLI truncates and rewrites the file; we may have caught it mid-write.
             time.sleep(0.1 * (attempt + 1))
     else:
-        raise RuntimeError(f"Colab CLI 세션 파일을 읽을 수 없습니다: {path}")
+        raise SessionFormatError(path, "JSON 형식이 아닙니다")
 
+    if not isinstance(data, dict):
+        raise SessionFormatError(path, "세션 목록 형식이 다릅니다")
     entry = data.get(name)
-    if not entry or not entry.get("url") or not entry.get("token"):
+    if entry is None:
         return None
+    if not isinstance(entry, dict) or not entry.get("url") or not entry.get("token"):
+        # The session exists but not in the shape we know: say so instead of "gone" (503).
+        raise SessionFormatError(path, f"세션 '{name}'에 url·token이 없습니다")
     return ProxyInfo(
         url=entry["url"].rstrip("/"),
         token=entry["token"],

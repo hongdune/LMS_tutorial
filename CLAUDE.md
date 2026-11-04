@@ -119,7 +119,7 @@ python3 -m venv .venv
 # 선택: torch·numpy가 있어야 하는 tests/test_frontend.py 테스트 9개는 없으면 건너뛴다([dev]에 없다)
 .venv/bin/pip install numpy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
 
-# 테스트 (현재 63개)
+# 테스트 (현재 68개)
 .venv/bin/pytest
 
 # 런타임 실행 (출력되는 URL/Token을 LMS에 등록)
@@ -250,15 +250,18 @@ python3 -m venv .venv
   - `tests/test_frontend.py`: torch·numpy가 필요한 테스트는 `_require(...)`(find_spec)로 건너뛴다. torch 없음 테스트의 `env` 대상은 numpy에서 `packaging`(필수 의존성)으로 바꿨다
   - torch·numpy 없는 venv: 54 passed, 9 skipped. 전체 환경: 63 passed
 
+- 2026-11-05 (WSL) CI, Colab CLI 버전 확인
+  - GitHub Actions `.github/workflows/tests.yml`: Python 3.10/3.12 × (CPU torch 있음/없음), `pytest -q -rs`. Colab에는 접속하지 않는다
+  - `lms-runtime --colab`이 시작할 때 CLI 버전을 확인한다. CLI를 실행하지 않고, 실행 파일(링크를 따라감)과 shebang 인터프리터의 venv에서 `google_colab_cli-*.dist-info/METADATA`를 읽는다. 0.7.5가 아니거나 확인하지 못하면 경고만 출력한다(`colab_session.PINNED_CLI_VERSION`)
+  - `sessions.json` 형식이 다르면(JSON 아님, 목록이 dict가 아님, 세션에 url·token 없음) `SessionFormatError`로 알린다. 시작할 때는 안내를 출력하고 종료 1, 실행 중에는 REST 503과 안내 `message`. 세션이 아예 없으면 지금처럼 "종료됨"으로 처리한다
+
 ### 다음 작업 (WSL, 우선순위 순)
 0. **Colab 커널 유실 조사 (최우선)**: 3장 "API로 만든 커널이 첫 실행 직후 사라짐". 같은 순서를 다른 날·다른 리전에서 재현하는지, CPU 런타임에서도 그런지 확인한다. 연결 수가 0으로 보이는 이유도 본다. googlecolab 문의에 이 결과를 덧붙인다
 0-1. **쉬는 Colab 커널의 `last_activity`**: 커널이 유지되는 상태에서 몇 분 동안 값이 그대로인지 확인한다. 바뀌면 자동 반납이 일어나지 않는다. 자동 반납 자체(반납과 0.00/hr)는 실측으로 확인했다
-1. **Colab 안내 범위 결정**: 끊김은 간헐적이고, 끊길 때 메시지 약 1개를 잃을 수 있다. 프론트 대책(LMS 95a346b)은 브라우저에서 확인했다. googlecolab 이슈 답변을 보고 베타로 열지 정한다
+1. **Colab 안내 범위**: 결정됨(2026-11-05, 사용자). 커널 유실 문제가 있어도 Colab 안내는 지금처럼 유지한다. 0번 결과는 LMS 세션에 알리고, 복구 화면 문구로 대응한다
 2. **Colab 브라우저 확인**: https://lms.132-145-125-71.sslip.io/courses/transformer/1 과 `/runtime-test`에서 `lms-runtime --colab` URL/Token으로 확인한다
 3. **Colab 쪽 `lms_kernel` 설치 방식**: 계약 4장 "헬퍼 버전 확인"과 함께 LMS 세션과 정한다. 지금은 Colab 커널에 `lms_kernel`이 없어서 프론트의 `info()`·`variables()` 호출이 `ModuleNotFoundError`로 끝난다
 
 개선 후보 (2026-11-03 정리, 우선순위 순. 계약을 건드리는 것은 LMS 세션과 먼저 합의한다)
-5. **CI**: GitHub Actions가 없다. Ubuntu + Python 3.10/3.12, CPU torch로 `pytest`를 돌린다. Colab 실측은 CI 대상이 아니다(가짜 업스트림 테스트만)
-6. **Colab CLI 버전 확인**: README는 0.7.5로 고정해 설치하지만, `lms-runtime --colab`은 버전을 확인하지 않는다. 시작할 때 `colab version`(또는 venv의 `importlib.metadata`)을 읽어 0.7.5가 아니면 경고만 출력한다. `sessions.json` 형식이 바뀌면 브리지가 조용히 503을 내므로, 읽기 실패 시 안내 문구도 넣는다
 7. **`--debug-drop-reply-once`와 `info()`**: 지금은 프론트가 접속 직후 부르는 `info()`(silent 실행)의 응답이 버려진다. silent 요청은 건너뛰고 학생의 첫 셀을 버리도록 바꿀지 정한다. 진단 옵션이라 계약은 바뀌지 않지만, 브라우저 확인 절차(LMS 95a346b)가 지금 동작에 맞춰져 있으면 LMS 세션에 알린다
 8. **googlecolab 이슈 후속**: 사용자가 제출한 두 이슈(로그의 자격증명, 서드파티 장시간 WS)의 URL을 3장에 적고, 답변에 따라 colab.log 경고와 WS 끊김 대책을 갱신한다

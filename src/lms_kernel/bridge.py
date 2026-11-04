@@ -30,7 +30,7 @@ from urllib.parse import urlencode, urlsplit
 
 from tornado import httpclient, web, websocket
 
-from .colab_session import ColabSession, SessionGone
+from .colab_session import ColabSession, SessionFormatError, SessionGone
 from .debug import ReplyDropper
 
 log = logging.getLogger("lms_kernel.bridge")
@@ -186,6 +186,8 @@ class RestHandler(_Auth, web.RequestHandler):
             info = await self.colab.current()
         except SessionGone:
             raise BridgeError(503, MSG_GONE)
+        except SessionFormatError as e:
+            raise BridgeError(503, str(e))
 
         query = _strip_token(self.request.query_arguments)
         method = self.request.method
@@ -221,6 +223,8 @@ class RestHandler(_Auth, web.RequestHandler):
                     info = await self.colab.refresh()
                 except SessionGone:
                     raise BridgeError(503, MSG_GONE)
+                except SessionFormatError as e:
+                    raise BridgeError(503, str(e))
                 continue
             break
 
