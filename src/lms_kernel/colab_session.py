@@ -4,6 +4,7 @@ We only touch the Colab CLI through stable-ish boundaries (CLAUDE.md 3장):
 - ``~/.config/colab-cli/sessions.json`` for the runtime proxy URL and token
 - ``colab status -s <name>`` to make the CLI refresh an expiring proxy token or
   prune a session whose assignment is gone server-side.
+- ``colab stop -s <name>`` to return the VM when the bridge has been idle (contract 2.1).
 
 Nothing here calls Colab's ``/tun/m/*`` API or uses the CLI's Python modules.
 Tokens are never logged.
@@ -183,7 +184,11 @@ class ColabSession:
             if throttled and self._info is not None:
                 return self._info
             self._last_refresh = now
-            await self._run_cli()
+            await self._run_cli(
+                ["status", "-s", self.name],
+                "[lms-runtime] Colab CLI로 세션 정보를 갱신하지 못했습니다. "
+                f"터미널에서 `colab status -s {self.name}`을 실행해 로그인 상태를 확인하세요.",
+            )
 
             info = read_session(self.sessions_path, self.name)
             if info is None:
@@ -192,11 +197,26 @@ class ColabSession:
             self._info = info
             return info
 
-    async def _run_cli(self) -> bool:
+    async def stop(self) -> bool:
+        """Return the VM with `colab stop`; True once the session is gone."""
+        async with self._lock:
+            if self.gone:
+                return True
+            ok = await self._run_cli(
+                ["stop", "-s", self.name],
+                "[lms-runtime] Colab 런타임을 반납하지 못했습니다. 컴퓨트 유닛이 계속 쓰일 수 있으니 "
+                f"터미널에서 `colab stop -s {self.name}`을 직접 실행하세요.",
+            )
+            if ok:
+                self.gone = True
+                self._info = None
+            return ok
+
+    async def _run_cli(self, args: list[str], failure_message: str) -> bool:
         cmd = [self.colab_cmd]
         if self._custom_path:
             cmd += ["--config", self.sessions_path]
-        cmd += ["status", "-s", self.name]
+        cmd += args
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -214,11 +234,6 @@ class ColabSession:
             await proc.wait()
             code = None
         if code != 0:
-            print(
-                "[lms-runtime] Colab CLI로 세션 정보를 갱신하지 못했습니다. "
-                f"터미널에서 `colab status -s {self.name}`을 실행해 로그인 상태를 확인하세요.",
-                file=sys.stderr,
-                flush=True,
-            )
+            print(failure_message, file=sys.stderr, flush=True)
             return False
         return True

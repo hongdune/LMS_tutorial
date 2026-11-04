@@ -10,7 +10,9 @@ without ``--colab``. The bridge:
 - pins ``Access-Control-Allow-Origin`` to the LMS origin and answers preflights,
 - forwards to the Colab runtime proxy with the proxy token attached,
 - drops Colab-only kernel messages (``colab_request`` ...),
-- turns an unreachable or terminated Colab runtime into REST errors / WebSocket close.
+- turns an unreachable or terminated Colab runtime into REST errors / WebSocket close,
+- returns the Colab VM with `colab stop` once every kernel has been idle long enough
+  (contract 2.1; Colab bills the VM assignment, not kernels).
 
 Neither the LMS token nor the Colab proxy token is ever logged.
 """
@@ -53,6 +55,9 @@ MAX_MESSAGE_SIZE = 256 * 1024 * 1024
 # Upstream reconnect (keep the browser WebSocket, reopen only the Colab side with the
 # same session_id so the Colab Jupyter Server replays what it buffered meanwhile).
 RECONNECT_DELAYS = (0.0, 1.0, 2.0, 4.0)
+# Idle stop (contract 2.1). A failed `colab stop` is retried after STOP_RETRY seconds.
+IDLE_POLL_INTERVAL = 60.0
+STOP_RETRY = 300.0
 
 MSG_GONE = "Colab 런타임이 종료되었습니다. `colab new`로 세션을 새로 만들고 lms-runtime을 다시 실행하세요."
 MSG_UNREACHABLE = "Colab 런타임에 연결할 수 없습니다. 런타임이 종료되었거나 네트워크에 문제가 있습니다."
@@ -509,6 +514,63 @@ async def keep_fresh(colab_session: ColabSession, interval: float = 15.0) -> Non
             break
         except Exception:
             log.exception("token refresh failed")
+
+
+async def stop_when_idle(
+    colab_session: ColabSession,
+    idle_timeout: float,
+    poll_interval: float = IDLE_POLL_INTERVAL,
+    stop_retry: float = STOP_RETRY,
+) -> bool:
+    """Contract 2.1 (colab): `colab stop` once every kernel has been idle for idle_timeout s.
+
+    Activity is read from the upstream ``GET /api/kernels``: a busy kernel, a change in
+    the set of kernels, or a change in any kernel's ``last_activity`` restarts the timer.
+    Upstream timestamps are only compared with each other, never with the local clock,
+    so clock skew between this PC (WSL) and the Colab VM does not matter. Open
+    WebSockets do not count. A poll that fails neither restarts the timer nor stops
+    the VM. Returns True if the VM was returned, False if the session went away first.
+    """
+    last_active = time.monotonic()
+    previous = None
+    retry_at = 0.0
+    while not colab_session.gone:
+        await asyncio.sleep(poll_interval)
+        try:
+            info = await colab_session.current()
+        except SessionGone:
+            return False
+        kernels = await upstream_json(info, "/api/kernels", HEARTBEAT_TIMEOUT)
+        if not isinstance(kernels, list):
+            continue
+        now = time.monotonic()
+        snapshot = frozenset((k.get("id"), k.get("last_activity")) for k in kernels if isinstance(k, dict))
+        busy = any(isinstance(k, dict) and k.get("execution_state") == "busy" for k in kernels)
+        if busy or snapshot != previous:
+            last_active = now
+        previous = snapshot
+        if now - last_active < idle_timeout or now < retry_at:
+            continue
+        if await colab_session.stop():
+            return True
+        retry_at = now + stop_retry
+    return False
+
+
+async def upstream_json(info, path: str, timeout: float):
+    """Parsed JSON body of GET <path> on the Colab runtime, or None on any failure."""
+    req = httpclient.HTTPRequest(
+        info.url + path,
+        headers={PROXY_TOKEN_HEADER: info.token, "Accept": "application/json"},
+        follow_redirects=False,
+        connect_timeout=timeout,
+        request_timeout=timeout,
+    )
+    try:
+        resp = await httpclient.AsyncHTTPClient().fetch(req, raise_error=False)
+        return json.loads(resp.body) if resp.code == 200 else None
+    except Exception:
+        return None
 
 
 async def upstream_status(info, path: str, timeout: float) -> Optional[int]:

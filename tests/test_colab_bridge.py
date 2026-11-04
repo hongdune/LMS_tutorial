@@ -54,6 +54,8 @@ def _start_upstream():
             f"--port={port}", "--ServerApp.ip=127.0.0.1",
             f"--IdentityProvider.token={PROXY_TOKEN}",
             "--ServerApp.identity_provider_class=fake_colab_proxy.FakeColabProxyIdentityProvider",
+            # Fake upstream only; lets the suite run in a root-only WSL like lms-runtime does.
+            "--ServerApp.allow_root=True",
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -373,6 +375,101 @@ def test_colab_stop_is_noticed_without_cli(make_bridge, upstream):
     assert requests.get(f"{b.base}/api/kernels", headers=_auth(), timeout=10).status_code == 503
 
 
+# --- idle stop (contract 2.1) --------------------------------------------------------
+
+def _stops(b) -> int:
+    p = Path(str(b.sessions_path) + ".stops")
+    return len(p.read_text().splitlines()) if p.exists() else 0
+
+
+def test_idle_stop_returns_vm_and_answers_503(make_bridge, upstream):
+    from lms_kernel.bridge import stop_when_idle
+
+    b = make_bridge(_session_entry(upstream, PROXY_TOKEN))
+    b.call(b.session.refresh())
+    t0 = time.time()
+    assert b.call(stop_when_idle(b.session, idle_timeout=1.0, poll_interval=0.2)) is True
+    assert 1.0 <= time.time() - t0 < 10
+    assert _stops(b) == 1
+    assert SESSION not in json.loads(b.sessions_path.read_text())
+    r = requests.get(f"{b.base}/api/kernels", headers=_auth(Origin=ORIGIN), timeout=10)
+    assert r.status_code == 503
+
+
+def test_idle_stop_waits_for_busy_kernel_and_open_websocket_does_not_count(make_bridge, upstream):
+    from lms_kernel.bridge import stop_when_idle
+
+    b = make_bridge(_session_entry(upstream, PROXY_TOKEN))
+    b.call(b.session.refresh())
+    kid = _new_kernel(b.base)
+    ws = websocket.create_connection(
+        f"{b.ws_base}/api/kernels/{kid}/channels?token={LMS_TOKEN}&session_id={uuid.uuid4().hex}",
+        origin=ORIGIN, timeout=30)
+    try:
+        _execute(ws, "import time")
+        msg_id = _send_execute(ws, "time.sleep(4)")
+        while True:  # wait until the kernel reports busy for this request
+            m = json.loads(ws.recv())
+            if (m.get("parent_header", {}).get("msg_id") == msg_id and m["msg_type"] == "status"
+                    and m["content"]["execution_state"] == "busy"):
+                break
+        t0 = time.time()
+        fut = asyncio.run_coroutine_threadsafe(
+            stop_when_idle(b.session, idle_timeout=1.5, poll_interval=0.2), b.loop)
+        # Busy for ~4s, then idle for 1.5s with the WebSocket still open.
+        assert fut.result(30) is True
+        assert time.time() - t0 >= 4.5
+        assert _stops(b) == 1
+    finally:
+        ws.close()
+        requests.delete(f"{upstream}/api/kernels/{kid}",
+                        headers={"X-Colab-Runtime-Proxy-Token": PROXY_TOKEN}, timeout=30)
+
+
+def test_idle_stop_timer_restarts_on_kernel_activity(make_bridge, upstream):
+    from lms_kernel.bridge import stop_when_idle
+
+    b = make_bridge(_session_entry(upstream, PROXY_TOKEN))
+    b.call(b.session.refresh())
+    kid = _new_kernel(b.base)
+    ws = websocket.create_connection(
+        f"{b.ws_base}/api/kernels/{kid}/channels?token={LMS_TOKEN}&session_id={uuid.uuid4().hex}",
+        origin=ORIGIN, timeout=30)
+    try:
+        fut = asyncio.run_coroutine_threadsafe(
+            stop_when_idle(b.session, idle_timeout=2.0, poll_interval=0.2), b.loop)
+        t0 = time.time()
+        while time.time() - t0 < 5:  # short cells every 0.8s, never 2s apart
+            _execute(ws, "1 + 1")
+            time.sleep(0.8)
+        assert not fut.done() and _stops(b) == 0
+        assert fut.result(30) is True
+        assert time.time() - t0 >= 5 + 2.0 - 0.8
+    finally:
+        ws.close()
+        requests.delete(f"{upstream}/api/kernels/{kid}",
+                        headers={"X-Colab-Runtime-Proxy-Token": PROXY_TOKEN}, timeout=30)
+
+
+def test_idle_stop_retries_when_cli_fails(make_bridge, upstream, capfd):
+    from lms_kernel.bridge import stop_when_idle
+
+    b = make_bridge(_session_entry(upstream, PROXY_TOKEN))
+    b.call(b.session.refresh())
+    fail = Path(str(b.sessions_path) + ".fail")
+    fail.touch()
+    fut = asyncio.run_coroutine_threadsafe(
+        stop_when_idle(b.session, idle_timeout=0.5, poll_interval=0.2, stop_retry=1.0), b.loop)
+    deadline = time.time() + 10
+    while _stops(b) < 1 and time.time() < deadline:
+        time.sleep(0.1)
+    assert _stops(b) == 1 and not b.session.gone
+    fail.unlink()
+    assert fut.result(30) is True
+    assert _stops(b) == 2
+    assert f"colab stop -s {SESSION}" in capfd.readouterr().err
+
+
 def test_upstream_down_gives_502_and_closes_websocket(make_bridge):
     proc, base = _start_upstream()
     try:
@@ -662,6 +759,9 @@ def test_cli_prints_registration_and_rejects_unknown_session(tmp_path, upstream)
             assert line, proc.stderr.read()
             lines.append(line)
         assert f"  URL  : http://127.0.0.1:{port}\n" in lines
+        notice = "".join(lines)
+        assert "예고 없이 종료될 수 있습니다" in notice
+        assert f"colab stop -s {SESSION}" in notice
         token = [l for l in lines if l.startswith("  Token:")][0].split(":", 1)[1].strip()
         r = requests.get(f"http://127.0.0.1:{port}/api/kernels",
                          headers={"Authorization": f"token {token}"}, timeout=30)

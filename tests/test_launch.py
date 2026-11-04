@@ -17,3 +17,35 @@ def test_debug_drop_reply_once_only_when_requested():
     key = "--ServerApp.kernel_websocket_connection_class=lms_kernel.debug.DropReplyOnceConnection"
     assert key not in build_command("http://lms.example:3000", 8899, "t")
     assert key in build_command("http://lms.example:3000", 8899, "t", debug_drop_reply_once=True)
+
+
+CULL_ARGS = (
+    "--MappingKernelManager.cull_interval=300",
+    "--MappingKernelManager.cull_connected=True",
+    "--MappingKernelManager.cull_busy=False",
+)
+
+
+def test_local_idle_timeout_is_off_by_default():
+    # Contract 2.1 (v0.8): local default 0.
+    cmd = build_command("http://lms.example:3000", 8899, "t")
+    assert not any("MappingKernelManager" in arg for arg in cmd)
+    cmd = build_command("http://lms.example:3000", 8899, "t", idle_timeout_minutes=0)
+    assert not any("MappingKernelManager" in arg for arg in cmd)
+
+
+def test_local_idle_timeout_minutes():
+    cmd = build_command("http://lms.example:3000", 8899, "t", idle_timeout_minutes=10)
+    assert "--MappingKernelManager.cull_idle_timeout=600" in cmd
+    for arg in CULL_ARGS:
+        assert arg in cmd
+
+
+def test_allow_root_follows_effective_user(monkeypatch):
+    key = "--ServerApp.allow_root=True"
+    assert key in build_command("http://lms.example:3000", 8899, "t", allow_root=True)
+    assert key not in build_command("http://lms.example:3000", 8899, "t", allow_root=False)
+    monkeypatch.setattr("lms_kernel.launch.os.geteuid", lambda: 0, raising=False)
+    assert key in build_command("http://lms.example:3000", 8899, "t")
+    monkeypatch.setattr("lms_kernel.launch.os.geteuid", lambda: 1000, raising=False)
+    assert key not in build_command("http://lms.example:3000", 8899, "t")

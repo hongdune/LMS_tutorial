@@ -82,6 +82,20 @@ OCI 인스턴스 (LMS 저장소)                   학생 PC: Windows + WSL (이
   - **한계**: 끊기는 순간 주변의 메시지 약 1개는 재전송되지 않고 사라진다(강제 끊김 15회 중 6회, 5초 뒤 재연결하면 3회 모두). 프록시 쪽 옛 연결로 이미 나간 메시지로 보인다. 사라진 것이 `execute_reply`나 마지막 `status: idle`이면 프론트는 실행이 끝나지 않은 것처럼 보인다.
   - 브리지 기본값은 B: 업스트림만 같은 `session_id`로 다시 연결한다(약 0.5초, 브라우저 WS 유지). 재시도 간격은 0, 1, 2, 4초이고, 모두 실패하거나 커널이 404면 브라우저 WS를 1011로 닫는다. 진단용 숨김 옵션은 `--no-upstream-reconnect`와 `--debug-drop-upstream-after <초>`다. `--debug-drop-reply-once`는 local 모드에서도 쓸 수 있고, 커널마다 첫 실행의 `execute_reply`와 그 실행의 `status: idle`을 브라우저로 보내지 않는다(응답 누락 재현용).
 
+### 유휴 종료와 컴퓨트 유닛 실측 (2026-11-05, T4, CLI 0.7.5)
+- `colab usage`로 잔액·사용률·할당 수를 볼 수 있다. T4 할당 직후 사용률은 1.15/hr이었다
+- Colab VM 안 jupyter-server의 `cull_idle_timeout`은 0(기본값)이다. `/root/.jupyter/jupyter_server_config.py`가 모두 주석이다. Colab 쪽 Jupyter는 유휴 커널을 종료하지 않는다
+- **커널을 모두 지워도 과금은 계속된다**: 브리지로 커널을 `DELETE`(204)해 0개로 만든 뒤 6분 동안 사용률 1.15/hr, 할당 1개가 그대로였다. 그동안 잔액이 0.10 줄었다. 과금 단위는 커널이 아니라 VM 할당이다
+- `colab stop` 직후 사용률 0.00/hr, 할당 0개가 됐다. 크레딧을 멈추는 방법은 VM 반납(`colab stop`)뿐이다
+- 확인하지 못한 것: Colab이 오래 방치된 할당을 스스로 회수하는지(수 시간 관찰이 필요하다)
+- 자동 반납 실측(브리지 `--idle-timeout 2`, T4 2회): 쉬기 시작한 지 약 3분 뒤(2분 + 60초 조회 간격) `colab stop`이 실행됐다. 이후 REST는 503을 돌려줬고 `colab usage`는 0.00/hr, 서버 쪽 세션은 0개였다
+- **API로 만든 커널이 첫 실행 직후 사라짐 (2026-11-05, 미해결)**: 새 T4 세션에서 `POST /api/kernels` → WS로 셀 1개를 실행하면, 출력과 idle은 정상으로 왔지만 곧바로 문제가 생겼다
+  - 브리지 경유 2회: 업스트림 WS가 바로 닫혔고, 커널 목록이 `[]`가 됐다
+  - 브리지 없이 직접 2회: 1회는 `GET /api/kernels`가 JSON이 아닌 응답을 돌려줬다. 1회는 연결 수 0이었고, 17초 뒤 WS가 닫혀 두 번째 셀이 실패했다
+  - 같은 날 `colab exec`로는 20초 간격으로 두 번 실행해도 같은 커널(같은 pid)이 유지됐다. 연결 수는 1이었다
+  - 3장 "WS 끊김"과 같은 계열로 보인다(남은 차이는 CLI의 클라이언트 식별 헤더). 11-03보다 훨씬 심하다. 이 상태로는 Colab 모드에서 두 번째 셀부터 실행되지 않을 수 있다
+  - 그래서 쉬는 커널의 `last_activity`가 스스로 바뀌는지는 이번에도 확인하지 못했다
+
 위험:
 - "notebook UI 우회"·"원격 제어" 제한은 **컴퓨트 유닛 잔액이 0보다 클 때만** 풀린다. Pro+라도 월 할당량을 다 쓰면 제한 대상이 되고, 런타임이 예고 없이 종료될 수 있다.
 - 세션 수명은 학생의 컴퓨트 유닛에 달려 있다.
@@ -105,12 +119,14 @@ python3 -m venv .venv
 # tests/test_frontend.py는 torch·numpy가 있어야 한다(필수 의존성이 아니라 [dev]에 없다)
 .venv/bin/pip install numpy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
 
-# 테스트 (현재 53개)
+# 테스트 (현재 63개)
 .venv/bin/pytest
 
 # 런타임 실행 (출력되는 URL/Token을 LMS에 등록)
 .venv/bin/lms-runtime --origin http://<OCI 주소>:3000 --port 8888
 ```
+
+- root로 실행하면 `build_command`가 `--ServerApp.allow_root=True`를 붙인다(로컬 런타임과 테스트 모두 그대로 동작한다)
 
 - 저장소는 WSL 파일시스템(예: `~/LMS_tutorial`)에 둔다. `/mnt/c/...`에서 작업하지 않는다.
 - `.venv`는 커밋하지 않는다. 줄바꿈은 `.gitattributes`로 LF로 고정한다.
@@ -202,8 +218,37 @@ python3 -m venv .venv
   - `docs/runtime-contract.md`를 v0.6(LMS a28965c)으로 갱신하고 `diff`로 원본과 같은지 확인했다
   - 계약을 구현에 맞췄다: 큰 int는 `bit_length() > 400`이면 `int`, 120자를 넘는 summary는 120자에서 자르고 `…`를 붙인다
   - `info()`의 `contract`를 `"0.6"`으로 올렸다. 구현의 다른 부분은 바꾸지 않았다
+- 2026-11-04 (WSL) 계약 v0.7, 유휴 커널 자동 종료
+  - `docs/runtime-contract.md`를 v0.7(LMS d432eed)로 갱신하고 `diff`로 원본과 같은지 확인했다. `info()`의 `contract`는 `"0.7"`
+  - `lms-runtime --idle-timeout <분>` (계약 2.1): 기본 120분, `0`이면 끈다. `MappingKernelManager`의 `cull_idle_timeout=분×60`, `cull_interval=300`, `cull_connected=True`, `cull_busy=False`. 기본값을 바꾸려면 계약 2.1을 먼저 고친다
+    - local 런타임에만 적용된다. `--colab`과 함께 주면 적용되지 않는다는 안내만 출력한다(Colab 커널 종료는 Colab이 관리)
+  - 테스트 `tests/test_idle_cull.py`: 실제 Jupyter Server에서 timeout만 3초로 줄여 확인한다. 유휴 커널 종료, WS가 붙어 있어도 종료, 실행 중인 커널은 유지
+  - 채점 커널(계약 5장)은 프론트가 표준 IPython만으로 실행하므로 런타임 쪽 작업은 없다
+- 2026-11-04 (WSL) root 계정 실행 허용
+  - 증상: 일반 사용자 없이 root만 있는 WSL에서 `lms-runtime`을 실행하면 Jupyter Server가 "Running as root is not recommended"를 내고 종료한다. `--allow-root`는 `lms-runtime`이 받지 않는다
+  - 결정: 막지 않는다. Jupyter의 root 거부는 공용 서버용 기본값이다. 이 런타임은 학생 본인 PC에서 본인 코드를 실행하고, WSL 일반 사용자도 `/mnt/c`의 Windows 파일에 접근할 수 있어 root로 늘어나는 위험은 배포판 손상 정도다. 외부 접근은 127.0.0.1·토큰·origin으로 막는다. 계정을 새로 만들고 다시 설치하게 하는 절차는 학생에게 부담이 크다
+  - 구현: 실효 UID가 0이면 `--ServerApp.allow_root=True`를 붙이고 "root 권한으로 실행된다"는 안내 한 줄을 출력한다. Colab 모드는 Jupyter를 띄우지 않으므로 해당 없음
+  - LMS 세션에 넘길 일: WSL 설치 안내에 "처음 실행할 때 사용자 이름·비밀번호를 만든다"를 분명히 적는다
+
+- 2026-11-05 (WSL) Colab 유휴 종료 실측과 안내
+  - 실측 결과는 3장 "유휴 종료와 컴퓨트 유닛 실측"에 적었다. v0.7의 커널 유휴 종료는 Colab 크레딧을 멈추지 못한다
+  - `lms-runtime --colab` 시작 시 안내를 출력한다: Colab 정책에 따라 설정과 관계없이 종료될 수 있다는 점, 페이지를 닫거나 커널이 종료돼도 과금이 계속되므로 `colab stop -s <세션>`으로 끄라는 점
+  - 사용자 결정: 로컬은 기본으로 자동 종료를 끈다. Colab은 기본으로 자동 종료(VM 반납)한다. 학생은 LMS 설정 화면에서 제어한다. 계약 2.1 개정이 먼저라 구현은 보류 중이다(다음 작업 0번)
+
+- 2026-11-05 (WSL) 계약 v0.8, Colab 자동 반납
+  - `docs/runtime-contract.md`를 v0.8(LMS 833577c)로 갱신하고 `diff`로 원본과 같은지 확인했다. `info()`의 `contract`는 `"0.8"`
+  - `--idle-timeout` 기본값: local `0`(끔), colab 60분(`launch.py`의 `DEFAULT_*IDLE_TIMEOUT_MINUTES`)
+  - Colab 자동 반납 `bridge.stop_when_idle`
+    - 60초마다 업스트림 `GET /api/kernels`를 읽는다. busy 커널이 있거나, 커널 목록이 바뀌거나, `last_activity`가 바뀌면 타이머를 다시 시작한다
+    - 업스트림 시각은 서로 비교만 하고 로컬 시계와 비교하지 않는다(WSL과 Colab VM의 시계 차이 무시). WS 연결은 활동으로 치지 않는다. 조회에 실패하면 타이머를 건드리지 않고 반납도 하지 않는다
+    - 반납은 `ColabSession.stop()`(`colab stop -s <세션>`)으로 한다. 실패하면 경고를 출력하고 5분 뒤 다시 시도한다. 반납한 뒤 REST는 503이고, 열린 WS는 heartbeat(30초) 안에 1011로 닫힌다
+  - 시작 안내: 과금 단위(VM), 자동 반납 시간, Colab 정책에 따른 종료 가능성. 반납하면 다시 시작하는 방법을 출력한다
+  - 테스트: 가짜 CLI에 `stop` 추가. 유휴 반납과 503, busy 동안 대기(WS가 열려 있어도 반납), 활동 시 타이머 재시작, CLI 실패 시 재시도
+  - 실측: 자동 반납과 크레딧 중지는 확인했다. 쉬는 커널의 `last_activity`는 커널 유실 때문에 확인하지 못했다(3장, 다음 작업 0번과 0-1번)
 
 ### 다음 작업 (WSL, 우선순위 순)
+0. **Colab 커널 유실 조사 (최우선)**: 3장 "API로 만든 커널이 첫 실행 직후 사라짐". 같은 순서를 다른 날·다른 리전에서 재현하는지, CPU 런타임에서도 그런지 확인한다. 연결 수가 0으로 보이는 이유도 본다. googlecolab 문의에 이 결과를 덧붙인다
+0-1. **쉬는 Colab 커널의 `last_activity`**: 커널이 유지되는 상태에서 몇 분 동안 값이 그대로인지 확인한다. 바뀌면 자동 반납이 일어나지 않는다. 자동 반납 자체(반납과 0.00/hr)는 실측으로 확인했다
 1. **Colab 안내 범위 결정**: 끊김은 간헐적이고, 끊길 때 메시지 약 1개를 잃을 수 있다. 프론트 대책(LMS 95a346b)은 브라우저에서 확인했다. googlecolab 이슈 답변을 보고 베타로 열지 정한다
 2. **Colab 브라우저 확인**: https://lms.132-145-125-71.sslip.io/courses/transformer/1 과 `/runtime-test`에서 `lms-runtime --colab` URL/Token으로 확인한다
 3. **Colab 쪽 `lms_kernel` 설치 방식**: 계약 4장 "헬퍼 버전 확인"과 함께 LMS 세션과 정한다. 지금은 Colab 커널에 `lms_kernel`이 없어서 프론트의 `info()`·`variables()` 호출이 `ModuleNotFoundError`로 끝난다
@@ -214,4 +259,3 @@ python3 -m venv .venv
 6. **Colab CLI 버전 확인**: README는 0.7.5로 고정해 설치하지만, `lms-runtime --colab`은 버전을 확인하지 않는다. 시작할 때 `colab version`(또는 venv의 `importlib.metadata`)을 읽어 0.7.5가 아니면 경고만 출력한다. `sessions.json` 형식이 바뀌면 브리지가 조용히 503을 내므로, 읽기 실패 시 안내 문구도 넣는다
 7. **`--debug-drop-reply-once`와 `info()`**: 지금은 프론트가 접속 직후 부르는 `info()`(silent 실행)의 응답이 버려진다. silent 요청은 건너뛰고 학생의 첫 셀을 버리도록 바꿀지 정한다. 진단 옵션이라 계약은 바뀌지 않지만, 브라우저 확인 절차(LMS 95a346b)가 지금 동작에 맞춰져 있으면 LMS 세션에 알린다
 8. **googlecolab 이슈 후속**: 사용자가 제출한 두 이슈(로그의 자격증명, 서드파티 장시간 WS)의 URL을 3장에 적고, 답변에 따라 colab.log 경고와 WS 끊김 대책을 갱신한다
-9. **계약 4장 테스트 결과 보고 형식**: 계약에 **결정 대기**로 남아 있다. LMS 세션이 정하기 전에는 구현하지 않는다
