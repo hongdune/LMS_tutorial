@@ -953,3 +953,75 @@ def test_bridge_drops_first_reply_once(make_bridge, upstream):
     b = make_bridge(_session_entry(upstream, PROXY_TOKEN), debug_drop_reply_once=True)
     b.call(b.session.refresh())
     check_first_reply_dropped(b.base, b.ws_base, _auth(), {"origin": ORIGIN}, token=LMS_TOKEN)
+
+
+# --- /lms/runtime, /lms/colab/usage (contract 2.2, 2.3) ----------------------------------
+
+def _reads(b) -> list:
+    p = Path(str(b.sessions_path) + ".reads")
+    return p.read_text().split() if p.exists() else []
+
+
+def test_runtime_info_answers_from_memory(bridge):
+    calls = bridge.calls()
+    r = requests.get(f"{bridge.base}/lms/runtime", headers=_auth(Origin=ORIGIN), timeout=5)
+    assert r.status_code == 200
+    assert r.headers["Access-Control-Allow-Origin"] == ORIGIN
+    assert r.json() == {
+        "version": 1, "kind": "colab", "lms_runtime": "0.4.0", "contract": "0.10",
+        "colab": {"session": SESSION, "machine": "T4"},
+    }
+    assert r.elapsed.total_seconds() < 1
+    assert bridge.calls() == calls and _reads(bridge) == []  # no CLI
+
+
+def test_lms_paths_have_the_same_auth_origin_and_preflight(bridge):
+    for path in ("/lms/runtime", "/lms/colab/usage"):
+        assert requests.get(f"{bridge.base}{path}", timeout=5).status_code == 403
+        r = requests.get(f"{bridge.base}{path}", headers=_auth(Origin="https://evil.test"), timeout=5)
+        assert r.status_code == 404
+        r = requests.options(f"{bridge.base}{path}", headers={
+            "Origin": ORIGIN, "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "authorization"}, timeout=5)
+        assert r.status_code == 204 and r.headers["Access-Control-Allow-Origin"] == ORIGIN
+        assert requests.post(f"{bridge.base}{path}", headers=_auth(), timeout=5).status_code == 405
+    assert _reads(bridge) == []
+
+
+def test_colab_usage_runs_cli_and_caches(bridge):
+    r = requests.get(f"{bridge.base}/lms/colab/usage", headers=_auth(Origin=ORIGIN), timeout=30)
+    assert r.status_code == 200
+    assert r.headers["Access-Control-Allow-Origin"] == ORIGIN
+    body = r.json()
+    assert body.pop("checked_at").endswith("Z")
+    assert body == {
+        "version": 1, "balance": 576.13, "rate_per_hour": 1.15,
+        "sessions": [{"name": SESSION, "machine": "T4", "current": True}], "raw": None,
+    }
+    assert _reads(bridge) == ["usage", "sessions"]
+    again = requests.get(f"{bridge.base}/lms/colab/usage", headers=_auth(), timeout=30)
+    assert again.json() == r.json()
+    assert _reads(bridge) == ["usage", "sessions"]  # 30s cache
+
+
+def test_colab_usage_unknown_output_gives_raw(make_bridge, upstream):
+    b = make_bridge(_session_entry(upstream, PROXY_TOKEN))
+    Path(str(b.sessions_path) + ".usage").write_text("Saldo: 12 CU\n")
+    r = requests.get(f"{b.base}/lms/colab/usage", headers=_auth(), timeout=30)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["balance"] is None and body["rate_per_hour"] is None
+    assert body["sessions"] == [{"name": SESSION, "machine": "T4", "current": True}]
+    assert body["raw"] == {"usage": "Saldo: 12 CU", "sessions": None}
+
+
+def test_colab_usage_cli_failure_gives_502_and_is_not_cached(make_bridge, upstream):
+    b = make_bridge(_session_entry(upstream, PROXY_TOKEN))
+    fail = Path(str(b.sessions_path) + ".fail")
+    fail.write_text("")
+    r = requests.get(f"{b.base}/lms/colab/usage", headers=_auth(Origin=ORIGIN), timeout=30)
+    assert r.status_code == 502
+    assert r.headers["Access-Control-Allow-Origin"] == ORIGIN
+    assert "colab usage" in r.json()["message"]
+    fail.unlink()
+    assert requests.get(f"{b.base}/lms/colab/usage", headers=_auth(), timeout=30).status_code == 200

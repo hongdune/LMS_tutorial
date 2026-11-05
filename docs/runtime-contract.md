@@ -1,6 +1,6 @@
 # LMS ↔ 학생 런타임 인터페이스 계약
 
-- 버전: **0.9** (2026-11-05)
+- 버전: **0.10** (2026-11-05)
 - 원본: `hongdune/LMS`의 `docs/runtime-contract.md`. `hongdune/LMS_tutorial`에는 같은 내용의 사본을 둔다.
 - 변경 절차: 내용을 바꾸면 버전을 올리고 아래 변경 기록에 한 줄을 남긴 뒤, 두 저장소의 파일을 **같은 내용으로** 갱신한다. 한쪽만 바뀐 상태로 커밋하지 않는다.
 - "결정 대기"로 표시한 항목은 한쪽에서 임의로 정하지 않는다. 정할 때는 이 문서부터 고친다.
@@ -17,6 +17,7 @@
 
 - 학생 런타임은 **표준 Jupyter Server API**만 노출한다. 프론트는 아래 경로만 사용한다.
   - REST: `GET/POST /api/kernels`, `GET/DELETE /api/kernels/{id}`, `POST /api/kernels/{id}/interrupt`, `POST /api/kernels/{id}/restart`, `GET /api/kernelspecs`
+  - LMS 확장(읽기 전용, v0.10): `GET /lms/runtime`(2.2), `GET /lms/colab/usage`(2.3). Jupyter 표준 경로가 아니지만 인증·Origin·CORS 규칙은 아래와 같다
   - WebSocket: `/api/kernels/{id}/channels` (Jupyter 메시지 프로토콜 v5)
     - 런타임은 WebSocket 서브프로토콜(`v1.kernel.websocket.jupyter.org`)을 선택하지 않을 수 있다. 프론트는 서브프로토콜 없는 기존 JSON 방식도 지원해야 한다(`@jupyterlab/services`는 기본 지원).
     - 프론트는 끊긴 WebSocket을 같은 `session_id` 쿼리로 다시 연결한다. 런타임(브리지 포함)은 `session_id`를 그대로 전달해, Jupyter Server가 끊긴 동안 쌓인 메시지를 재전송할 수 있게 한다.
@@ -43,9 +44,47 @@
   - 채택하지 않은 대안: 실행 중에 값을 바꾸는 설정용 경로. 표준 API 밖의 쓰기 경로라 인증·Origin 규칙, 설정 저장, Jupyter Server와 브리지 양쪽 구현이 필요하다. 학생이 대개 한 번 정하는 값이라 이득이 작다고 판단했다. 채택하려면 이 절에 경로와 인증을 먼저 정한다.
 - 프론트의 처리(구현됨): 저장된 커널 id가 `/api/kernels/{id}`에서 404이면 새 커널을 만들고 "이전 커널이 종료되었다"는 복구 안내를 띄운다. 열려 있던 페이지에서 커널이 사라지면 상태가 `disconnected`가 되고, "새 커널 시작" 버튼으로 이어 간다. Colab 반납 뒤에는 503의 `message`를 그대로 보여 준다.
 
+### 2.2 런타임 정보 — `GET /lms/runtime` (v0.10, 구현: LMS_tutorial)
+
+브라우저는 local과 Colab 브리지를 URL로 구분할 수 없다(둘 다 `127.0.0.1`). 그래서 런타임이 자기 종류를 알려 준다. 프론트는 연결 직후 한 번 부르고 결과를 기억한다.
+
+```json
+{"version": 1, "kind": "local", "lms_runtime": "0.4.0", "contract": "0.10", "colab": null}
+{"version": 1, "kind": "colab", "lms_runtime": "0.4.0", "contract": "0.10",
+ "colab": {"session": "<--colab 세션 이름>", "machine": "T4"}}
+```
+
+- 인증·Origin·CORS는 2장의 REST와 같다(`Authorization: token`, `StrictOriginIdentityProvider`, 고정 `Access-Control-Allow-Origin`). Jupyter Server 확장 핸들러(`JupyterHandler`)로 만들면 그대로 적용된다.
+- 응답은 빨라야 한다(1초 이내). Colab CLI를 부르지 않는다. `machine`은 브리지가 이미 아는 경우만 채우고 모르면 `null`이다.
+- 프론트 처리(구현됨): `404`이면 0.10 이전 런타임으로 보고 "알 수 없음"으로 표시하며 Colab 항목을 숨긴다. `kind`가 `colab`일 때만 2.3을 부른다. 중앙 서버에 기록하는 `runtime_kind`도 이 값으로 정한다(3장).
+
+### 2.3 Colab 사용량 — `GET /lms/colab/usage` (v0.10, 구현: LMS_tutorial)
+
+`--colab` 브리지에만 있다. local 런타임은 `404`. 브리지가 학생 PC에서 `colab usage`와 `colab sessions`를 실행해 결과를 돌려준다. 중앙 서버는 이 값을 받지 않는다.
+
+```json
+{
+  "version": 1,
+  "checked_at": "2026-11-05T12:00:00Z",
+  "balance": 576.13,
+  "rate_per_hour": 1.15,
+  "sessions": [
+    {"name": "lms-abc", "machine": "T4", "current": true},
+    {"name": null, "machine": "A100", "current": false}
+  ],
+  "raw": null
+}
+```
+
+- `checked_at`: 브리지가 CLI를 실행한 시각(UTC ISO 8601, 캐시된 응답이면 그 시각). 프론트는 없어도 동작한다.
+- `balance`: 남은 컴퓨트 유닛. `rate_per_hour`: 시간당 컴퓨트 유닛(0.8의 실측 값 `1.15/hr`와 같은 값, 원천은 CLI의 `consumptionRateHourly`, VM 반납 뒤 `0.00`). `sessions`: 이 계정에서 켜져 있는 모든 할당, `current`는 이 브리지가 쓰는 세션. `name`은 서버에는 있지만 이 PC의 Colab CLI가 모르는 할당(CLI 표시 `[?]`)이면 `null`. `machine`은 CLI 표기 그대로(`T4`, `A100`, `CPU` …, `/lms/runtime`의 `colab.machine`도 같다). 세션이 없으면 `[]`.
+- Colab CLI 출력 형식은 계약 밖이다(CLI 버전에 따라 바뀔 수 있다). 브리지가 해석하지 못한 값은 `null`로 두고, 그 명령의 출력 원문(앞뒤 공백 제거, 4,000자까지)을 `raw`의 같은 이름 칸에 넣는다. 해석한 명령의 칸은 `null`이고, 모두 해석했으면 `raw` 자체가 `null`. 참고로 Colab CLI 0.7.5의 출력(LMS_tutorial 2026-11-06 실측): `colab usage`는 `Current balance: 576.13 compute units` / `Usage rate: 1.15/hr` / `Active assignments: 1` 세 줄, `colab sessions`는 할당마다 `[이름] <id> | Hardware: T4 | Shape: Standard | Variant: GPU`, 없으면 `[colab] No active sessions found on server.` 원문에 토큰·자격증명이 섞이지 않게 한다.
+- 브리지는 결과를 30초 동안 캐시한다(`colab sessions`는 서버 동기화·토큰 갱신·사라진 세션 정리를 함께 하므로 자주 부르지 않는다). 프론트는 학생이 "조회"를 누를 때만 부르고 주기적으로 부르지 않는다. 브리지는 CLI가 30초 안에 끝나지 않으면 502로 답하고, 프론트는 40초까지 기다린다.
+- CLI 실행이 실패하거나 시간을 넘기면 `502`, 본문 `{"message": "<한국어 안내>"}`(3장 오류 형식). VM을 반납한 뒤(2.1)에도 이 경로는 동작한다(계정 단위 정보라서).
+
 ## 3. 런타임 종류
 
-중앙 서버에는 커널 id와 종류만 저장한다(URL·토큰은 저장하지 않는다). 종류는 프론트가 URL 호스트로 정한다: `localhost`·`127.0.0.1`이면 `local`, 그 밖은 `remote`. Colab 브리지는 로컬 주소이므로 `local`로 기록된다.
+중앙 서버에는 커널 id와 종류만 저장한다(URL·토큰은 저장하지 않는다). 종류는 2.2의 `kind`가 `colab`이면 `colab`, 아니면 URL 호스트로 정한다: `localhost`·`127.0.0.1`이면 `local`, 그 밖은 `remote`(v0.10. 그 전에는 Colab 브리지도 `local`로 기록됐다).
 
 - `local`: 학생 PC의 `lms-runtime`.
 - `colab`: 학생 PC의 `lms-runtime --colab <session>`이 연 로컬 브리지. 프론트 입장에서 `local`과 같은 URL + 토큰이며, 2장의 경로를 그대로 중계한다.
@@ -166,6 +205,31 @@
 
 - 슬라이더·드롭다운으로 코드를 다시 실행하는 상호작용(2.11 둘째 항목)은 콘텐츠 문법(`# @slider`·`# @select`, LMS CLAUDE.md 4장)과 프론트의 일이며 이 계약에 포함하지 않는다. 런타임에는 추가로 필요한 것이 없다.
 
+### 4.6 리소스 — `resources()` (v0.10)
+
+커널이 도는 기계(local이면 학생 PC, Colab이면 Colab VM)의 GPU·메모리·저장 공간. 프론트는 임시 커널에서 부른다(환경 점검과 같은 방식).
+
+```json
+{
+  "version": 1,
+  "cpu": {"count": 8, "percent": 12.5},
+  "memory": {"total": 13605867520, "available": 11811160064, "used": 1794707456},
+  "disk": {"path": "/content", "total": 120942624768, "used": 40265318400, "free": 80677306368},
+  "gpus": [
+    {"index": 0, "name": "Tesla T4", "memory_total": 16106127360, "memory_used": 2147483648,
+     "utilization": 35, "temperature": 61}
+  ],
+  "gpu_error": null,
+  "mps": false
+}
+```
+
+- 단위는 바이트, 비율은 0–100. 모르는 값은 `null`.
+- GPU는 `nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu,temperature.gpu --format=csv,noheader,nounits`로 읽는다(시간 제한 5초, MiB를 바이트로 바꿈). `nvidia-smi`가 없으면 `gpus: []`, `gpu_error: null`. 실행했는데 실패하면 `gpus: []`와 `gpu_error`에 이유. GPU 사용량은 기계 전체 기준이라 다른 커널이 쓰는 메모리도 포함된다.
+- `torch`는 import하지 않는다(임시 커널에서 몇 초씩 걸린다). `mps`는 macOS arm64이면 `true`로 둔다(실제 사용 가능 여부는 환경 점검 4.3의 `torch.mps`).
+- 메모리·CPU는 `psutil`이 있으면 쓰고, 없으면 `/proc/meminfo`·`os.cpu_count()`로 채우고 `percent`는 `null`. 저장 공간은 커널 작업 디렉터리(`os.getcwd()`)의 `shutil.disk_usage`.
+- 전체가 2초 안에 끝나야 한다(`cpu.percent`는 0.1초 간격 측정 정도).
+
 ## 5. 채점 커널 (2.6)
 
 - 프론트가 같은 런타임에 **새 커널을 만들어**(`POST /api/kernels`) 학생 코드와 테스트 코드만 실행하고, 결과를 받은 뒤 그 커널을 종료한다(`DELETE`). 과제의 `timeout`(초)을 넘으면 프론트가 커널을 종료하고 실패로 처리한다.
@@ -174,6 +238,7 @@
 
 ## 변경 기록
 
+- 0.10 (2026-11-05): 런타임 정보 `GET /lms/runtime`(2.2), Colab 사용량 `GET /lms/colab/usage`(2.3), 리소스 헬퍼 `resources()`(4.6), `runtime_kind`에 `colab` 추가(3장). 사용자 요청: 로컬·Colab 리소스 확인, Colab 크레딧·시간당 사용량, 켜진 세션 수. 프론트는 구현됨(0.10 이전 런타임에서는 해당 항목을 "업데이트 필요"로 표시). 2.3의 `raw: null`, `name: null`, `checked_at` 선택, 시간 제한, CLI 출력 참고는 LMS_tutorial 구현·실측(2026-11-06)에 맞춰 같은 버전 안에서 정했다(push 전).
 - 0.9 (2026-11-05): WebSocket 메시지의 `header.session`과 URL `session_id` 일치 규칙(2장), Colab 헬퍼 복사 방식(4장). 근거(LMS_tutorial 32c2e39 실측): 두 값이 같으면 5/5 유지, 다르면 2/2 끊김. 프론트 동작 변경 없음.
 - 0.1 (2026-11-03): 저장소 분리와 함께 최초 작성.
 - 0.2 (2026-11-03): WebSocket 서브프로토콜 미선택 허용과 `session_id` 전달(2장), Colab 브리지 오류 형식과 종료 감지 지연(3장).

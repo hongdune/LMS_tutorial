@@ -114,7 +114,7 @@ def test_helper_exception_comes_back_as_error(kernel):
 
 def test_info(kernel):
     data = _json(kernel.helper("info()")[0])
-    assert data == {"version": 1, "lms_kernel": "0.3.0", "contract": "0.9"}
+    assert data == {"version": 1, "lms_kernel": "0.4.0", "contract": "0.10"}
 
 
 def test_env_with_torch(kernel):
@@ -367,3 +367,76 @@ def test_variables_shows_injected_name_once_student_overwrites_it():
         assert "exit" not in v and "In" not in v
     finally:
         k.stop()
+
+
+# --- 4.6 resources ------------------------------------------------------------------------
+
+import os
+import subprocess
+import sys
+import time
+
+from lms_kernel import frontend
+
+
+def test_resources_in_kernel(kernel):
+    t0 = time.monotonic()
+    data = _json(kernel.helper("resources()")[0])
+    assert time.monotonic() - t0 < 2
+    assert set(data) == {"version", "cpu", "memory", "disk", "gpus", "gpu_error", "mps"}
+    assert data["version"] == 1 and data["cpu"]["count"] >= 1
+    assert data["memory"]["total"] > 0
+    disk = data["disk"]
+    assert disk["path"] and disk["total"] >= disk["free"] > 0
+    assert isinstance(data["gpus"], list)
+
+
+def test_resources_does_not_import_torch():
+    code = ("import sys, lms_kernel.frontend as f; f.resources(); "
+            "assert 'torch' not in sys.modules and 'numpy' not in sys.modules")
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=30)
+
+
+def _fake_smi(tmp_path, monkeypatch, body):
+    smi = tmp_path / "nvidia-smi"
+    smi.write_text("#!/bin/sh\n" + body)
+    smi.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+
+def test_gpus_from_nvidia_smi(tmp_path, monkeypatch):
+    _fake_smi(tmp_path, monkeypatch,
+              'echo "0, Tesla T4, 15360, 2048, 35, 61"\n'
+              'echo "1, NVIDIA GeForce RTX 4090, 24564, 0, [N/A], [N/A]"\n')
+    gpus, error = frontend._gpus()
+    assert error is None
+    assert gpus == [
+        {"index": 0, "name": "Tesla T4", "memory_total": 15360 * 1024 * 1024,
+         "memory_used": 2048 * 1024 * 1024, "utilization": 35, "temperature": 61},
+        {"index": 1, "name": "NVIDIA GeForce RTX 4090", "memory_total": 24564 * 1024 * 1024,
+         "memory_used": 0, "utilization": None, "temperature": None},
+    ]
+
+
+def test_nvidia_smi_failure_and_absence(tmp_path, monkeypatch):
+    _fake_smi(tmp_path, monkeypatch, 'echo "NVIDIA-SMI has failed because it could not communicate" >&2\nexit 9\n')
+    gpus, error = frontend._gpus()
+    assert gpus == [] and "exit 9" in error and "could not communicate" in error
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    assert frontend._gpus() == ([], None)
+
+
+def test_nvidia_smi_timeout(tmp_path, monkeypatch):
+    _fake_smi(tmp_path, monkeypatch, "sleep 5\n")
+    monkeypatch.setattr(frontend, "NVIDIA_SMI_TIMEOUT", 0.3)
+    gpus, error = frontend._gpus()
+    assert gpus == [] and "timed out" in error
+
+
+def test_cpu_memory_without_psutil(monkeypatch):
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    cpu, memory = frontend._cpu_memory()
+    assert cpu == {"count": os.cpu_count(), "percent": None}
+    if os.path.exists("/proc/meminfo"):
+        assert memory["total"] > memory["available"] > 0
+        assert memory["used"] == memory["total"] - memory["available"]

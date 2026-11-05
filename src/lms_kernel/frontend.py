@@ -13,7 +13,7 @@ Rules (contract 4.1):
 
 torch and numpy are optional. ``variables()``/``module_tree()`` only look at them when
 the student already imported them (``sys.modules``); ``env()`` imports torch only if it
-is installed.
+is installed; ``resources()`` never imports it.
 """
 
 from __future__ import annotations
@@ -21,14 +21,17 @@ from __future__ import annotations
 import collections
 import importlib.metadata
 import importlib.util
+import os
 import platform
+import shutil
+import subprocess
 import sys
 import types
 from typing import Any, Optional
 
 from . import __version__
 
-CONTRACT_VERSION = "0.9"
+CONTRACT_VERSION = "0.10"
 SCHEMA_VERSION = 1
 
 MAX_VARIABLES = 200
@@ -113,6 +116,111 @@ def env(requirements=()) -> Result:
         "platform": platform.platform(),
         "packages": [_package(str(r)) for r in requirements],
         "torch": _torch_env(),
+    })
+
+
+# --- 4.6 resources ----------------------------------------------------------------------
+
+NVIDIA_SMI_TIMEOUT = 5.0
+NVIDIA_SMI_QUERY = "index,name,memory.total,memory.used,utilization.gpu,temperature.gpu"
+MIB = 1024 * 1024
+
+
+def _num(text: str, scale: int = 1) -> Optional[int]:
+    """nvidia-smi field -> int (None for "[N/A]", "[Not Supported]", ...)."""
+    try:
+        return int(float(text.strip()) * scale)
+    except ValueError:
+        return None
+
+
+def _gpus() -> tuple[list, Optional[str]]:
+    exe = shutil.which("nvidia-smi")
+    if exe is None:
+        return [], None
+    try:
+        out = subprocess.run(
+            [exe, f"--query-gpu={NVIDIA_SMI_QUERY}", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=NVIDIA_SMI_TIMEOUT,
+            stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired:
+        return [], f"nvidia-smi timed out after {NVIDIA_SMI_TIMEOUT:.0f}s"
+    except OSError as e:
+        return [], f"nvidia-smi: {e}"[:500]
+    if out.returncode != 0:
+        detail = (out.stderr or out.stdout).strip().splitlines()
+        return [], (f"nvidia-smi exit {out.returncode}: " + (detail[0] if detail else ""))[:500]
+    gpus = []
+    for line in out.stdout.splitlines():
+        fields = [f.strip() for f in line.split(",")]
+        if len(fields) != 6:
+            continue
+        gpus.append({
+            "index": _num(fields[0]),
+            "name": fields[1],
+            "memory_total": _num(fields[2], MIB),
+            "memory_used": _num(fields[3], MIB),
+            "utilization": _num(fields[4]),
+            "temperature": _num(fields[5]),
+        })
+    return gpus, None
+
+
+def _meminfo() -> dict:
+    values = {}
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                key, _, rest = line.partition(":")
+                parts = rest.split()
+                if parts and parts[0].isdigit():
+                    values[key] = int(parts[0]) * 1024  # kB
+    except OSError:
+        pass
+    total, available = values.get("MemTotal"), values.get("MemAvailable")
+    used = total - available if total is not None and available is not None else None
+    return {"total": total, "available": available, "used": used}
+
+
+def _cpu_memory() -> tuple[dict, dict]:
+    try:
+        import psutil
+    except Exception:
+        psutil = None
+    if psutil is not None:
+        try:
+            vm = psutil.virtual_memory()
+            return (
+                {"count": os.cpu_count(), "percent": float(psutil.cpu_percent(interval=0.1))},
+                {"total": int(vm.total), "available": int(vm.available), "used": int(vm.used)},
+            )
+        except Exception:
+            pass
+    return {"count": os.cpu_count(), "percent": None}, _meminfo()
+
+
+def _disk() -> dict:
+    path = None
+    try:
+        path = os.getcwd()
+        du = shutil.disk_usage(path)
+        return {"path": path, "total": du.total, "used": du.used, "free": du.free}
+    except OSError:
+        return {"path": path, "total": None, "used": None, "free": None}
+
+
+def resources() -> Result:
+    cpu, memory = _cpu_memory()
+    gpus, gpu_error = _gpus()
+    return Result({
+        "version": SCHEMA_VERSION,
+        "cpu": cpu,
+        "memory": memory,
+        "disk": _disk(),
+        "gpus": gpus,
+        "gpu_error": gpu_error,
+        "mps": platform.system() == "Darwin" and platform.machine() == "arm64",
     })
 
 

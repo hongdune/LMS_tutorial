@@ -158,3 +158,31 @@ def test_error_responses_keep_cors_header(runtime):
                        headers={"Authorization": "token wrong", "Origin": ORIGIN}, timeout=5)
     assert bad.status_code == 403
     assert bad.headers.get("Access-Control-Allow-Origin") == ORIGIN
+
+
+def test_lms_runtime_info(runtime):
+    base, _ = runtime
+    r = requests.get(f"{base}/lms/runtime", headers={**_auth(), "Origin": ORIGIN}, timeout=5)
+    assert r.status_code == 200
+    assert r.headers.get("Access-Control-Allow-Origin") == ORIGIN
+    assert r.json() == {"version": 1, "kind": "local", "lms_runtime": "0.4.0", "contract": "0.10",
+                        "colab": None}
+    assert r.elapsed.total_seconds() < 1
+
+
+def test_lms_runtime_info_auth_and_origin(runtime):
+    base, _ = runtime
+    assert requests.get(f"{base}/lms/runtime", timeout=5).status_code == 403
+    r = requests.get(f"{base}/lms/runtime", headers={**_auth(), "Origin": "http://evil.test"}, timeout=5)
+    assert r.status_code == 404
+    r = requests.options(f"{base}/lms/runtime", headers={
+        "Origin": ORIGIN, "Access-Control-Request-Method": "GET",
+        "Access-Control-Request-Headers": "authorization"}, timeout=5)
+    assert r.status_code in (200, 204) and r.headers.get("Access-Control-Allow-Origin") == ORIGIN
+
+
+def test_colab_usage_is_not_served_locally(runtime):
+    base, _ = runtime
+    r = requests.get(f"{base}/lms/colab/usage", headers={**_auth(), "Origin": ORIGIN}, timeout=5)
+    assert r.status_code == 404
+    assert r.headers.get("Access-Control-Allow-Origin") == ORIGIN

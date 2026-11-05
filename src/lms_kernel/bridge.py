@@ -34,7 +34,9 @@ from urllib.parse import urlencode, urlsplit
 
 from tornado import httpclient, web, websocket
 
-from .colab_session import ColabSession, SessionFormatError, SessionGone
+from .colab_session import CLIError, ColabSession, SessionFormatError, SessionGone
+from .colab_usage import UsageCache
+from .runtime_info import runtime_info
 from .debug import ReplyDropper
 
 log = logging.getLogger("lms_kernel.bridge")
@@ -272,6 +274,38 @@ class RestHandler(_Auth, web.RequestHandler):
         self.finish()
 
     get = post = delete = _forward
+
+
+MACHINE_LABELS = {"NONE": "CPU"}
+
+
+class RuntimeInfoHandler(RestHandler):
+    """GET /lms/runtime (contract 2.2): answered from memory, no CLI or upstream call."""
+
+    def get(self):
+        colab = self.colab
+        info = colab.info
+        accelerator = info.accelerator if info is not None else None
+        machine = MACHINE_LABELS.get(accelerator, accelerator) if accelerator else None
+        self.set_header("Content-Type", "application/json")
+        self.finish(json.dumps(runtime_info("colab", colab.name, machine)))
+
+    SUPPORTED_METHODS = ("GET", "OPTIONS")
+
+
+class ColabUsageHandler(RestHandler):
+    """GET /lms/colab/usage (contract 2.3): `colab usage` + `colab sessions`, cached 30s."""
+
+    async def get(self):
+        cache = self._settings()["usage_cache"]
+        try:
+            body = await cache.get()
+        except CLIError as e:
+            raise BridgeError(502, str(e))
+        self.set_header("Content-Type", "application/json")
+        self.finish(json.dumps(body, ensure_ascii=False))
+
+    SUPPORTED_METHODS = ("GET", "OPTIONS")
 
 
 class ChannelsHandler(_Auth, websocket.WebSocketHandler):
@@ -570,10 +604,13 @@ def make_app(
             (rf"{kernel}/(?:interrupt|restart)", RestHandler),
             (r"/api/kernelspecs", RestHandler),
             (rf"/api/kernels/({ID})/channels", ChannelsHandler),
+            (r"/lms/runtime", RuntimeInfoHandler),
+            (r"/lms/colab/usage", ColabUsageHandler),
         ],
         lms_origin=origin,
         lms_token=token,
         colab_session=colab_session,
+        usage_cache=UsageCache(colab_session),
         upstream_reconnect=upstream_reconnect,
         debug_drop_upstream_after=debug_drop_upstream_after,
         reply_dropper=ReplyDropper() if debug_drop_reply_once else None,

@@ -101,6 +101,8 @@ OCI 인스턴스 (LMS 저장소)                   학생 PC: Windows + WSL (이
   - 11-03의 간헐적 "WS 끊김"과 관계있는지는 모른다(그때 스크립트가 남아 있지 않다). 재측정 결과는 위 "WS 끊김"
   - 프록시가 가끔 `POST /api/kernels`에 500이나 JSON이 아닌 응답을 준다(커널을 많이 만들고 지운 세션에서 자주 나왔다). 다시 시도하면 201이었다
   - 90분 모니터(01:49~03:19, 새 T4 세션 33회, 리전 usw/use/ass/euw 등): 같은 session 값을 쓰는 우리 방식은 66회 중 64회 커널이 유지됐다. 나머지 2회는 REST 타임아웃 1회와 목록 조회 503 1회였고, 커널은 살아 있었다. CLI 라이브러리(식별 헤더 없음)는 32/32, `colab exec`는 32/33이었다. 실제 커널 유실은 없었고 일시적인 프록시 오류만 있었다
+- `colab usage`·`colab sessions` 출력 (CLI 0.7.5, 2026-11-06 T4, 소스 `consumption.py`·`commands/session.py`): `usage`는 `Current balance: 576.13 compute units` / `Usage rate: 1.15/hr` / `Active assignments: 1` 세 줄이다(소수 둘째 자리, 원천은 `/tun/m/ccu-info`의 `consumptionRateHourly`). `sessions`는 할당마다 `[이름] <endpoint> | Hardware: T4 | Shape: Standard | Variant: GPU`이고, 없으면 `[colab] No active sessions found on server.`다. 이 PC가 모르는 할당은 `[?]`, Hardware는 `NONE`을 `CPU`로 보여 준다. `sessions`는 서버와 동기화하면서 토큰 갱신과 사라진 세션 정리를 같이 한다. 실행 시간은 두 명령 합쳐 약 2~3초다
+- Colab VM의 `/`, `/content`, `/tmp`, `/root`는 같은 overlay 파일시스템이다. `shutil.disk_usage`의 total(약 253GB)·free는 VM 디스크 기준이고, used는 VM 시작 뒤 쓴 양(upper layer, 시작 직후 약 86MB)만 센다. API로 만든 커널의 작업 디렉터리는 `/`다
 - 쉬는 커널의 `last_activity` (브리지 경유, T4, WS 연결 유지, 연결 수 1): 4분 동안 같은 값이었다. `--idle-timeout 3`에서 마지막 활동 4분 뒤 반납됐다. 자동 반납은 실제 Colab 조건에서도 동작한다
 
 위험:
@@ -126,7 +128,7 @@ python3 -m venv .venv
 # 선택: torch·numpy가 있어야 하는 tests/test_frontend.py 테스트 9개는 없으면 건너뛴다([dev]에 없다)
 .venv/bin/pip install numpy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
 
-# 테스트 (현재 70개)
+# 테스트 (현재 90개)
 .venv/bin/pytest
 
 # 런타임 실행 (출력되는 URL/Token을 LMS에 등록)
@@ -281,10 +283,19 @@ python3 -m venv .venv
   - LMS 세션 질문(11-03 메시지 누락 측정이 session 불일치 스크립트였는지)에 답하려고 재측정했다. 결과는 3장 "WS 끊김". 실험 스크립트는 `scripts/colab_longrun.py`로 남긴다(pytest 대상 아님)
   - 사용: 576.13 CU 남음. 세션 `lr`은 `colab stop`으로 반납했다(사용률 0.00/hr, 할당 0)
 
+- 2026-11-06 (WSL) 계약 v0.10: 런타임 정보, Colab 사용량, 리소스
+  - `docs/runtime-contract.md`를 v0.10(LMS 5610365)으로 갱신하고 `diff`로 원본과 같은지 확인했다. 패키지 버전 0.4.0, `info()`의 `contract`는 `"0.10"`
+  - `GET /lms/runtime`(2.2, `runtime_info.py`): local은 `server.RuntimeInfoHandler`(Jupyter `APIHandler`라 토큰·Origin·CORS가 `/api/kernels`와 같다), 브리지는 `bridge.RuntimeInfoHandler`가 메모리의 세션 정보로 답한다(CLI·업스트림 호출 없음). `machine`은 `accelerator`(`NONE`→`CPU`)
+  - `GET /lms/colab/usage`(2.3, 브리지만, `colab_usage.py`): `ColabSession.cli_output()`으로 `colab usage`·`colab sessions`를 실행하고 `UsageCache`가 30초 캐시한다(실패는 캐시하지 않음, 동시 요청은 한 번만 실행). 해석 못 한 명령의 출력은 `raw.usage`/`raw.sessions`(앞뒤 공백 제거, 4,000자, 토큰 모양 문자열 가림). CLI 실패·30초 초과는 502 `{"message"}`. local은 404
+  - `resources()`(4.6, `frontend.py`): `nvidia-smi`(5초 제한, MiB→바이트, `[N/A]`→null), psutil이 없으면 `/proc/meminfo`(used=total−available)와 `percent: null`, `shutil.disk_usage(os.getcwd())`. torch·numpy를 import하지 않는다. 헬퍼 복사 목록은 그대로다
+  - 테스트: 파서 단위 테스트(`tests/test_colab_usage.py`), 가짜 CLI에 `usage`·`sessions` 추가, 브리지·local 경로의 인증·Origin·preflight·405, 캐시, 502, 가짜 `nvidia-smi`(정상·실패·시간 초과), psutil 없음, torch 미import
+  - 실측(T4): `/lms/runtime` 1ms 미만, `/lms/colab/usage` 첫 호출 1.8~3.3초·캐시 1ms 미만, 새 커널의 첫 `resources()` 1.7초·두 번째 0.2초, Tesla T4 16106127360바이트, torch 미import. 디스크 값의 의미는 3장
+
 ### 다음 작업 (WSL, 우선순위 순)
 1. **브리지 첫 업스트림 연결 재시도**: `bridge.ChannelsHandler.open()`은 `_connect_upstream()`이 한 번 실패하면(Colab 프록시 WS 핸드셰이크 시간 초과, 3장) 바로 1011로 닫는다. 끊김 복구처럼 `RECONNECT_DELAYS`로 다시 시도하게 한다. tornado는 `open()`이 끝날 때까지 `on_message`를 부르지 않으므로 메시지 보관은 필요 없다. 가짜 업스트림에서 첫 WS 연결만 실패시키는 테스트를 같이 만든다. `CONNECT_TIMEOUT`(15초)을 줄일지도 검토한다(핸드셰이크가 늦을 때 전체 대기가 길어진다)
 2. **Colab 브라우저 확인**: https://lms.132-145-125-71.sslip.io/courses/transformer/1 과 `/runtime-test`에서 `lms-runtime --colab` URL/Token으로 확인한다
 3. **LMS 세션에 재측정 결과 전달**: 3장 "WS 끊김"의 재측정 요약을 보낸다(1번을 고친 뒤면 그 결과도). "베타" 표시와 googlecolab 문의 정리는 LMS 세션이 정한다
+4. **v0.10 브라우저 확인**: LMS 런타임 상태 화면에서 local·Colab 각각 `/lms/runtime`, Colab 사용량 "조회", `resources()` 표시를 확인한다
 
 개선 후보 (2026-11-03 정리, 우선순위 순. 계약을 건드리는 것은 LMS 세션과 먼저 합의한다)
 8. **googlecolab 이슈 후속**: 사용자가 제출한 두 이슈(로그의 자격증명, 서드파티 장시간 WS)의 URL을 3장에 적고, 답변에 따라 colab.log 경고와 WS 끊김 대책을 갱신한다

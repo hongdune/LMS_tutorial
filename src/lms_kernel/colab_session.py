@@ -86,6 +86,10 @@ class SessionGone(Exception):
     """The Colab session no longer exists (stopped, reclaimed, or never created)."""
 
 
+class CLIError(RuntimeError):
+    """A Colab CLI command could not be run or failed (message is student-facing Korean)."""
+
+
 class SessionFormatError(RuntimeError):
     """sessions.json is not in the format of the pinned Colab CLI version."""
 
@@ -261,6 +265,38 @@ class ColabSession:
                 self.gone = True
                 self._info = None
             return ok
+
+    async def cli_output(self, args: list[str], timeout: float = CLI_TIMEOUT) -> str:
+        """stdout of a read-only CLI command (e.g. `usage`, `sessions`).
+
+        Raises CLIError when the command is missing, fails or times out. stderr is
+        discarded: the CLI writes nothing secret there, but nothing from it is needed.
+        """
+        cmd = [self.colab_cmd]
+        if self._custom_path:
+            cmd += ["--config", self.sessions_path]
+        cmd += args
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            raise CLIError(f"`{self.colab_cmd}` 명령을 찾을 수 없습니다.")
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise CLIError(f"`colab {args[0]}`이 {timeout:.0f}초 안에 끝나지 않았습니다.")
+        if proc.returncode != 0:
+            raise CLIError(
+                f"`colab {args[0]}`이 실패했습니다(종료 코드 {proc.returncode}). "
+                "터미널에서 직접 실행해 로그인 상태를 확인하세요."
+            )
+        return out.decode("utf-8", "replace")
 
     async def _run_cli(self, args: list[str], failure_message: str) -> bool:
         cmd = [self.colab_cmd]
