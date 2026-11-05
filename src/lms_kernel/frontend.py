@@ -28,7 +28,7 @@ from typing import Any, Optional
 
 from . import __version__
 
-CONTRACT_VERSION = "0.8"
+CONTRACT_VERSION = "0.9"
 SCHEMA_VERSION = 1
 
 MAX_VARIABLES = 200

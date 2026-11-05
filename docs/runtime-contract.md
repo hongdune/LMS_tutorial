@@ -1,6 +1,6 @@
 # LMS ↔ 학생 런타임 인터페이스 계약
 
-- 버전: **0.8** (2026-11-05)
+- 버전: **0.9** (2026-11-05)
 - 원본: `hongdune/LMS`의 `docs/runtime-contract.md`. `hongdune/LMS_tutorial`에는 같은 내용의 사본을 둔다.
 - 변경 절차: 내용을 바꾸면 버전을 올리고 아래 변경 기록에 한 줄을 남긴 뒤, 두 저장소의 파일을 **같은 내용으로** 갱신한다. 한쪽만 바뀐 상태로 커밋하지 않는다.
 - "결정 대기"로 표시한 항목은 한쪽에서 임의로 정하지 않는다. 정할 때는 이 문서부터 고친다.
@@ -20,6 +20,7 @@
   - WebSocket: `/api/kernels/{id}/channels` (Jupyter 메시지 프로토콜 v5)
     - 런타임은 WebSocket 서브프로토콜(`v1.kernel.websocket.jupyter.org`)을 선택하지 않을 수 있다. 프론트는 서브프로토콜 없는 기존 JSON 방식도 지원해야 한다(`@jupyterlab/services`는 기본 지원).
     - 프론트는 끊긴 WebSocket을 같은 `session_id` 쿼리로 다시 연결한다. 런타임(브리지 포함)은 `session_id`를 그대로 전달해, Jupyter Server가 끊긴 동안 쌓인 메시지를 재전송할 수 있게 한다.
+    - 같은 연결에서 보내는 메시지의 `header.session`은 WebSocket URL의 `session_id`와 같아야 한다. Colab 프록시는 둘이 다르면 약 0.2초 뒤 연결을 끊는다. `@jupyterlab/services`는 하나의 클라이언트 id를 둘 다에 쓰므로 프론트는 이미 지킨다. 메시지를 직접 만드는 코드(테스트 스크립트 포함)도 이 규칙을 따른다.
 - 등록 정보는 **URL + 토큰** 두 값이다. `lms-runtime`이 시작할 때 터미널에 출력하고, 학생이 LMS 화면에 입력한다.
   - URL: `http://127.0.0.1:<port>` (기본 포트 8888). 학생 PC 기준이며, WSL에서는 Windows 브라우저가 `localhost` 포워딩으로 접근한다.
   - 토큰: 실행할 때마다 새로 만든 무작위 문자열 (`secrets.token_urlsafe(32)`).
@@ -57,6 +58,7 @@
 ## 4. 커널 안 헬퍼 (`lms_kernel`)
 
 - 학생 런타임의 커널 환경에는 `lms_kernel` 패키지가 설치되어 있어야 한다. 프론트가 부르는 함수는 모두 `lms_kernel.frontend` 모듈에 둔다.
+- Colab(`--colab`): 브리지가 시작할 때 표준 Contents API로 헬퍼 파일(`lms_kernel/{__init__,frontend,viz}.py`, `lms_viz/__init__.py`)만 Colab VM에 복사한다. 그래서 Colab 커널의 헬퍼 버전은 항상 브리지와 같다. 브라우저 쪽에는 `/api/contents`를 열지 않는다(2장의 경로 목록 그대로).
 - 학생 네임스페이스에 이름을 남기지 않는다. 헬퍼가 어쩔 수 없이 이름을 만들어야 하면 `_lms_` 접두사를 쓴다.
 
 ### 4.1 호출 방식 (인스펙터·환경 점검·버전 확인)
@@ -172,6 +174,7 @@
 
 ## 변경 기록
 
+- 0.9 (2026-11-05): WebSocket 메시지의 `header.session`과 URL `session_id` 일치 규칙(2장), Colab 헬퍼 복사 방식(4장). 근거(LMS_tutorial 32c2e39 실측): 두 값이 같으면 5/5 유지, 다르면 2/2 끊김. 프론트 동작 변경 없음.
 - 0.1 (2026-11-03): 저장소 분리와 함께 최초 작성.
 - 0.2 (2026-11-03): WebSocket 서브프로토콜 미선택 허용과 `session_id` 전달(2장), Colab 브리지 오류 형식과 종료 감지 지연(3장).
 - 0.8 (2026-11-05): 유휴 종료(2.1) 개정 — local 기본 끔, Colab은 기본 60분 idle이면 `colab stop`으로 VM 반납, 학생 설정은 실행 명령 생성으로. 근거(LMS_tutorial 실측, T4, Colab CLI 0.7.5): 커널을 모두 DELETE한 뒤 6분 동안 사용률 1.15/hr 유지·잔액 감소, `colab stop` 직후 0.00/hr. Colab VM의 jupyter-server는 `cull_idle_timeout=0`.
