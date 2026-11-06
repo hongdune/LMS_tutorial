@@ -323,6 +323,7 @@ def test_execute_over_websocket_and_drop_colab_messages(bridge, upstream, caplog
         ws = websocket.create_connection(
             f"{bridge.ws_base}/api/kernels/{kid}/channels?session_id=abc&token={LMS_TOKEN}",
             origin=ORIGIN, timeout=60)
+        _wait_ready(ws, diagnostics=lambda: _upstream_diagnostics(upstream, kid))
         seen = _execute(ws, COLAB_REQUEST_CODE)
         types = [m["msg_type"] for m in seen]
         assert "colab_request" not in types
@@ -728,6 +729,7 @@ def test_bridge_reconnects_upstream_and_keeps_browser_websocket(make_bridge, rel
     url = f"{b.ws_base}/api/kernels/{kid}/channels?session_id=client-2&token={LMS_TOKEN}"
     try:
         ws = websocket.create_connection(url, origin=ORIGIN, timeout=30)
+        _wait_ready(ws, diagnostics=lambda: _upstream_diagnostics(relay.url, kid))
         mid = _send_execute(ws, SLOW_CODE)
         first, _ = _collect(ws, mid, until_first_stream=True)
         relay.cut_all()
