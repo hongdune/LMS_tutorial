@@ -45,8 +45,12 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+UPSTREAM_LOG = {}  # base URL -> log file of that fake upstream (for failure diagnostics)
+
+
 def _start_upstream(root_dir):
     port = _free_port()
+    log = Path(root_dir).parent / f"upstream-{port}.log"
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(TESTS), os.environ.get("PYTHONPATH", "")])}
     proc = subprocess.Popen(
         [
@@ -59,10 +63,11 @@ def _start_upstream(root_dir):
             f"--ServerApp.root_dir={root_dir}",  # Contents API writes go here, never the repo
         ],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=log.open("w"),
         env=env,
     )
     base = f"http://127.0.0.1:{port}"
+    UPSTREAM_LOG[base] = log
     deadline = time.time() + 30
     while time.time() < deadline:
         try:
@@ -189,7 +194,22 @@ def _msg(msg_type, content):
     }
 
 
-def _wait_ready(ws, limit=60):
+def _upstream_diagnostics(upstream, kid) -> str:
+    """Kernel state and recent log lines of the fake upstream, for a failing CI run
+    (job logs need sign-in; pytest's E lines become public annotations)."""
+    try:
+        r = requests.get(f"{upstream}/api/kernels/{kid}",
+                         headers={"X-Colab-Runtime-Proxy-Token": PROXY_TOKEN}, timeout=5)
+        state = f"{r.status_code} {r.text[:300]}"
+    except requests.RequestException as e:
+        state = type(e).__name__
+    log = UPSTREAM_LOG.get(upstream)
+    lines = log.read_text(errors="replace").splitlines() if log and log.exists() else []
+    interesting = [l for l in lines if kid in l or any(k in l for k in ("[W ", "[E ", "[C ", "Error", "Traceback"))]
+    return "upstream kernel: " + state + "\nupstream log:\n" + "\n".join(interesting[-20:])
+
+
+def _wait_ready(ws, limit=60, diagnostics=None):
     """kernel_info_request until answered, like @jupyterlab/services. On a slow runner a
     fresh kernel may not answer a request sent right after it starts (see test_idle_cull)."""
     deadline = time.time() + limit
@@ -208,7 +228,8 @@ def _wait_ready(ws, limit=60):
                 continue
     finally:
         ws.settimeout(30)
-    pytest.fail("kernel never answered kernel_info_request")
+    pytest.fail("kernel never answered kernel_info_request"
+                + ("\n" + diagnostics() if diagnostics else ""))
 
 
 def _execute(ws, code):
@@ -434,7 +455,7 @@ def test_idle_stop_waits_for_busy_kernel_and_open_websocket_does_not_count(make_
         f"{b.ws_base}/api/kernels/{kid}/channels?token={LMS_TOKEN}&session_id={uuid.uuid4().hex}",
         origin=ORIGIN, timeout=30)
     try:
-        _wait_ready(ws)
+        _wait_ready(ws, diagnostics=lambda: _upstream_diagnostics(upstream, kid))
         _execute(ws, "import time")
         msg_id = _send_execute(ws, "time.sleep(4)")
         while True:  # wait until the kernel reports busy for this request
@@ -467,7 +488,7 @@ def test_idle_stop_timer_restarts_on_kernel_activity(make_bridge, upstream):
     try:
         # Start the timer only once the kernel answers: on a slow runner a kernel that is
         # still starting can outlast the 4s timeout, and the VM is returned mid-test.
-        _wait_ready(ws)
+        _wait_ready(ws, diagnostics=lambda: _upstream_diagnostics(upstream, kid))
         _execute(ws, "1 + 1")
         fut = asyncio.run_coroutine_threadsafe(
             stop_when_idle(b.session, idle_timeout=4.0, poll_interval=0.2), b.loop)
