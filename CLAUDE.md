@@ -128,7 +128,7 @@ python3 -m venv .venv
 # 선택: torch·numpy가 있어야 하는 tests/test_frontend.py 테스트 9개는 없으면 건너뛴다([dev]에 없다)
 .venv/bin/pip install numpy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
 
-# 테스트 (현재 94개)
+# 테스트 (현재 98개)
 .venv/bin/pytest
 
 # 런타임 실행 (출력되는 URL/Token을 LMS에 등록)
@@ -307,6 +307,13 @@ python3 -m venv .venv
 - 2026-11-07 (WSL) README Colab CLI 설치: root 계정에서 `colab`을 못 찾는 문제
   - Ubuntu root의 `~/.profile`에는 `~/.local/bin`을 PATH에 넣는 코드가 없다(`/etc/skel/.profile`에만 있다). 그래서 `source ~/.profile`로는 root만 쓰는 WSL에서 PATH가 바뀌지 않았다
   - README는 `~/.bashrc`에 PATH 줄을 한 번만 추가하고(grep으로 중복 방지) 현재 셸에서 `export`한다. root 형태의 임시 HOME에서 기존 단계 실패, 새 단계 성공, 새 로그인 셸 유지, 중복 없음을 확인했다
+
+- 2026-11-07 (WSL) 설치 스크립트 `install.sh`
+  - `curl -fsSL https://raw.githubusercontent.com/hongdune/LMS_tutorial/main/install.sh | bash [-s -- --colab --origin URL]`. 저장소 clone 없이 GitHub 아카이브(`--ref`, 기본 main)를 `~/.lms-runtime/venv`에 설치하고, `--colab`이면 `~/.colab-cli`에 CLI 0.7.5(Python 3.12 이상), `~/.config/colab-cli` 권한 700, `~/.local/bin` 링크와 `~/.bashrc`(zsh면 `~/.zshrc`) PATH 한 줄. 다시 실행하면 lms-kernel만 올린다. 스크립트 본문은 `main()` 안에 있어서 다운로드가 중간에 끊기면 아무것도 실행하지 않는다
+  - Python이 없거나 venv 모듈이 없으면(`ensurepip` import 실패) `apt install pythonX.Y-venv` 등 안내 후 종료 1. root가 아니면 `sudo `를 붙여 안내한다
+  - 실측: root 형태 임시 HOME에서 `--colab` 전체 설치 48초, 새 로그인 셸에서 두 명령 인식, 재실행 시 중복 없음, 설치된 런타임 403 응답, venv 없는 Python 안내
+  - 테스트 `tests/test_install.py`: 이 체크아웃을 `--source`로 설치(네트워크 필요), 재실행, venv 없음 안내, 잘못된 옵션, CLI 버전 고정값이 `PINNED_CLI_VERSION`과 같은지
+  - `PINNED_CLI_VERSION`을 바꾸면 `install.sh`의 `COLAB_CLI_VERSION`도 같이 바꾼다(테스트가 잡는다)
 
 ### 다음 작업 (WSL, 우선순위 순)
 1. **브리지 첫 업스트림 연결 재시도**: `bridge.ChannelsHandler.open()`은 `_connect_upstream()`이 한 번 실패하면(Colab 프록시 WS 핸드셰이크 시간 초과, 3장) 바로 1011로 닫는다. 끊김 복구처럼 `RECONNECT_DELAYS`로 다시 시도하게 한다. tornado는 `open()`이 끝날 때까지 `on_message`를 부르지 않으므로 메시지 보관은 필요 없다. 가짜 업스트림에서 첫 WS 연결만 실패시키는 테스트를 같이 만든다. `CONNECT_TIMEOUT`(15초)을 줄일지도 검토한다(핸드셰이크가 늦을 때 전체 대기가 길어진다)
