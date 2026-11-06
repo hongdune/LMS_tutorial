@@ -581,6 +581,7 @@ class CuttableRelay:
         self.conns: list[socket.socket] = []
         self.lock = threading.Lock()
         self.refuse = False  # drop new connections right away (runtime unreachable)
+        self.refuse_next = 0  # drop only this many new connections
         self.listener = socket.socket()
         self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.listener.bind(("127.0.0.1", 0))
@@ -595,7 +596,8 @@ class CuttableRelay:
                 client, _ = self.listener.accept()
             except OSError:
                 return
-            if self.refuse:
+            if self.refuse or self.refuse_next > 0:
+                self.refuse_next = max(0, self.refuse_next - 1)
                 client.close()
                 continue
             server = socket.create_connection(("127.0.0.1", self.target_port))
@@ -1059,7 +1061,7 @@ def test_runtime_info_answers_from_memory(bridge):
     assert r.status_code == 200
     assert r.headers["Access-Control-Allow-Origin"] == ORIGIN
     assert r.json() == {
-        "version": 1, "kind": "colab", "lms_runtime": "0.6.0", "contract": "0.12",
+        "version": 1, "kind": "colab", "lms_runtime": "0.6.1", "contract": "0.12",
         "colab": {"session": SESSION, "machine": "T4"},
     }
     assert r.elapsed.total_seconds() < 1
@@ -1116,3 +1118,145 @@ def test_colab_usage_cli_failure_gives_502_and_is_not_cached(make_bridge, upstre
     assert "colab usage" in r.json()["message"]
     fail.unlink()
     assert requests.get(f"{b.base}/lms/colab/usage", headers=_auth(), timeout=30).status_code == 200
+
+
+# --- lost kernels, proxy 404s and retries (2026-11-07 incident) ----------------------------
+
+def _kernel_info_round_trip(ws):
+    req = _msg("kernel_info_request", {})
+    ws.send(json.dumps(req))
+    while json.loads(ws.recv()).get("parent_header", {}).get("msg_id") != req["header"]["msg_id"]:
+        pass
+
+
+def _close_code(ws) -> int:
+    while True:
+        opcode, data = ws.recv_data(control_frame=True)
+        if opcode == websocket.ABNF.OPCODE_CLOSE:
+            return struct.unpack("!H", data[:2])[0]
+
+
+def test_unknown_kernel_404_passes_through_without_cli(bridge):
+    calls = bridge.calls()
+    r = requests.get(f"{bridge.base}/api/kernels/{uuid.uuid4()}", headers=_auth(), timeout=30)
+    assert r.status_code == 404
+    assert "Kernel does not exist" in r.json()["message"]
+    assert bridge.calls() == calls  # a Jupyter 404 is an answer, not a token problem
+
+
+def test_proxy_404_refreshes_token_once_then_gives_502(make_bridge, upstream, caplog):
+    # The proxy keeps rejecting the token (empty-body 404) even after the CLI refresh.
+    b = make_bridge(_session_entry(upstream, "never-valid"), next_entry=_session_entry(upstream, "still-invalid"))
+    b.call(_load_without_cli(b.session))
+    caplog.set_level(logging.WARNING, logger="lms_kernel.bridge")
+    r = requests.get(f"{b.base}/api/kernels", headers=_auth(), timeout=30)
+    assert r.status_code == 502 and r.json()["message"]
+    time.sleep(1)
+    assert b.calls() == 2  # one refresh for the retry, one background liveness check
+    assert requests.get(f"{b.base}/api/kernels", headers=_auth(), timeout=30).status_code == 502
+    time.sleep(1)
+    assert b.calls() == 3  # the retry again; the liveness check is throttled (LIVENESS_INTERVAL)
+    assert "proxy answered 404 body=''" in caplog.text
+    assert "never-valid" not in caplog.text and "still-invalid" not in caplog.text
+
+
+def test_websocket_first_connect_is_retried(make_bridge, relay, monkeypatch):
+    import lms_kernel.bridge as bridge_mod
+
+    monkeypatch.setattr(bridge_mod, "RECONNECT_DELAYS", (0.0, 0.2, 0.2))
+    b = make_bridge(_session_entry(relay.url, PROXY_TOKEN), min_refresh_interval=3600)
+    b.call(b.session.refresh())
+    kid = _new_kernel(b.base)
+    try:
+        relay.refuse_next = 2  # the first upstream WebSocket and the REST check after it fail
+        ws = websocket.create_connection(
+            f"{b.ws_base}/api/kernels/{kid}/channels?session_id=client-r&token={LMS_TOKEN}",
+            origin=ORIGIN, timeout=30)
+        _kernel_info_round_trip(ws)
+        assert relay.refuse_next == 0
+        ws.close()
+    finally:
+        requests.delete(f"{b.base}/api/kernels/{kid}", headers=_auth(), timeout=30)
+
+
+def test_websocket_to_gone_kernel_stops_at_once_and_is_remembered(bridge, caplog):
+    caplog.set_level(logging.WARNING, logger="lms_kernel.bridge")
+    kid = str(uuid.uuid4())
+    url = f"{bridge.ws_base}/api/kernels/{kid}/channels?session_id=client-g&token={LMS_TOKEN}"
+    for _ in range(2):
+        ws = websocket.create_connection(url, origin=ORIGIN, timeout=30)
+        t0 = time.time()
+        assert _close_code(ws) == 1011
+        assert time.time() - t0 < 5  # no backoff for a kernel Colab says does not exist
+    # A WebSocket to a missing kernel restarts the Colab runtime container (measured
+    # 2026-11-07), so the bridge checks over REST first and never opens one; the second
+    # browser attempt does not reach Colab at all.
+    assert "upstream websocket connect failed" not in caplog.text
+    assert caplog.text.count("does not exist on Colab; not opening a websocket") == 1
+    assert PROXY_TOKEN not in caplog.text
+
+
+def _fake_vm_files(root: Path, start_ticks: int, oom_kill: int = 0):
+    """The procfs/cgroup files colab_diag reads, as plain files under the Contents root."""
+    (root / "proc" / "1").mkdir(parents=True, exist_ok=True)
+    (root / "proc" / "stat").write_text("cpu  1 2 3\nbtime 1794000000\n")
+    (root / "proc" / "1" / "stat").write_text(
+        "1 (docker-init) S 0 1 1 0 -1 4194560 " + " ".join(["0"] * 12) + f" {start_ticks} 1000 10\n")
+    (root / "proc" / "meminfo").write_text("MemTotal:       13286932 kB\nMemAvailable:   12143736 kB\n")
+    cg = root / "var" / "colab" / "cgroup" / "jupyter-children"
+    cg.mkdir(parents=True, exist_ok=True)
+    (cg / "memory.events").write_text(f"low 0\nhigh 0\nmax 0\noom 0\noom_kill {oom_kill}\n")
+    (cg / "memory.peak").write_text("1142435840\n")
+    (cg / "memory.max").write_text("12063866880\n")
+
+
+def test_runtime_restart_is_explained_and_helpers_are_copied_again(make_bridge, upstream, upstream_root,
+                                                                   caplog, capfd):
+    import shutil
+    from lms_kernel.bridge import HelperInstaller
+
+    _fake_vm_files(upstream_root, start_ticks=1000)
+    try:
+        b = make_bridge(_session_entry(upstream, PROXY_TOKEN))
+        b.call(b.session.refresh())
+        inst = HelperInstaller(b.session)
+        b.server.stop()
+        b.server = b.call(_start_with_installer(b, inst))
+        caplog.set_level(logging.WARNING, logger="lms_kernel.bridge")
+        kid = _new_kernel(b.base)  # copies the helpers and makes the kernel known
+        assert inst.done
+        deadline = time.time() + 10
+        while b.call(_watch_start(b)) is None and time.time() < deadline:
+            time.sleep(0.1)
+
+        # Colab restarts the runtime container: new PID 1, every kernel and file gone.
+        _fake_vm_files(upstream_root, start_ticks=99000, oom_kill=0)
+        requests.delete(f"{upstream}/api/kernels/{kid}",
+                        headers={"X-Colab-Runtime-Proxy-Token": PROXY_TOKEN}, timeout=30)
+        shutil.rmtree(upstream_root / "lms_kernel")
+        assert requests.get(f"{b.base}/api/kernels/{kid}", headers=_auth(), timeout=30).status_code == 404
+        deadline = time.time() + 10
+        while "runtime_restarted=yes" not in caplog.text and time.time() < deadline:
+            time.sleep(0.1)
+        assert "runtime_restarted=yes" in caplog.text
+        assert "oom_kill=0" in caplog.text and "kernels_mem_peak=1.1GiB/11.2GiB" in caplog.text
+        assert "재시작되었습니다" in capfd.readouterr().err
+
+        kid2 = _new_kernel(b.base)  # helpers are copied again before the new kernel starts
+        assert (upstream_root / "lms_kernel" / "frontend.py").exists()
+        requests.delete(f"{b.base}/api/kernels/{kid2}", headers=_auth(), timeout=30)
+    finally:
+        for d in ("proc", "var", "lms_kernel", "lms_viz"):
+            shutil.rmtree(upstream_root / d, ignore_errors=True)
+
+
+async def _watch_start(b):
+    return _find_watch(b).container_start
+
+
+def _find_watch(b):
+    import gc
+    from lms_kernel.bridge import RuntimeWatch
+
+    return next(o for o in gc.get_objects() if isinstance(o, RuntimeWatch) and o.colab is b.session
+                and o.installer is not None)

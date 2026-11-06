@@ -114,7 +114,7 @@ def test_helper_exception_comes_back_as_error(kernel):
 
 def test_info(kernel):
     data = _json(kernel.helper("info()")[0])
-    assert data == {"version": 1, "lms_kernel": "0.6.0", "contract": "0.12"}
+    assert data == {"version": 1, "lms_kernel": "0.6.1", "contract": "0.12"}
 
 
 def test_env_with_torch(kernel):

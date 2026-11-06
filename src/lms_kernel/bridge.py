@@ -25,6 +25,7 @@ import asyncio
 import hmac
 import json
 import logging
+import re
 import struct
 import sys
 import time
@@ -34,8 +35,9 @@ from urllib.parse import urlencode, urlsplit
 
 from tornado import httpclient, web, websocket
 
+from .colab_diag import snapshot
 from .colab_session import CLIError, ColabSession, SessionFormatError, SessionGone
-from .colab_usage import UsageCache
+from .colab_usage import UsageCache, scrub
 from .runtime_info import runtime_info
 from .debug import ReplyDropper
 
@@ -58,9 +60,18 @@ HEARTBEAT_INTERVAL = 30.0
 HEARTBEAT_TIMEOUT = 10.0
 HEARTBEAT_FAILURES = 2
 MAX_MESSAGE_SIZE = 256 * 1024 * 1024
-# Upstream reconnect (keep the browser WebSocket, reopen only the Colab side with the
-# same session_id so the Colab Jupyter Server replays what it buffered meanwhile).
-RECONNECT_DELAYS = (0.0, 1.0, 2.0, 4.0)
+# Upstream connect/reconnect: exponential backoff, at most len(RECONNECT_DELAYS) attempts.
+# Reconnects keep the browser WebSocket and reopen only the Colab side with the same
+# session_id so the Colab Jupyter Server replays what it buffered meanwhile. Attempts stop
+# as soon as the Colab Jupyter Server says the kernel does not exist.
+RECONNECT_DELAYS = (0.0, 1.0, 2.0, 4.0, 8.0)
+# A failure that may mean the Colab session is gone runs `colab status` at most this often
+# (each CLI run writes credentials to colab.log; measured 2026-11-07: a burst of failures
+# ran it every 30 s for 7 minutes).
+LIVENESS_INTERVAL = 120.0
+# Diagnostics read from the Colab VM when a kernel disappears (colab_diag), at most this often.
+DIAG_INTERVAL = 30.0
+BODY_HEAD = 200
 # Idle stop (contract 2.1). A failed `colab stop` is retried after STOP_RETRY seconds.
 IDLE_POLL_INTERVAL = 60.0
 STOP_RETRY = 300.0
@@ -102,6 +113,39 @@ def _strip_token(query_arguments: dict) -> list[tuple[str, str]]:
         if k != "token"
         for v in values
     ]
+
+
+def jupyter_error(body) -> Optional[str]:
+    """The ``message`` of a Jupyter Server JSON error body, or None.
+
+    The Colab proxy answers an unknown/invalid proxy token (and requests with an Origin
+    header) with 404 and an empty body (measured 2026-11-07), while the Colab Jupyter
+    Server answers an unknown kernel with 404 and ``{"message": "Kernel does not exist: ..."}``.
+    """
+    try:
+        data = json.loads(body)
+    except Exception:
+        return None
+    message = data.get("message") if isinstance(data, dict) else None
+    return message if isinstance(message, str) else None
+
+
+def from_jupyter(body) -> bool:
+    """True if an error response came from the Colab Jupyter Server rather than the proxy:
+    a JSON error (REST) or Jupyter's HTML error page (WebSocket handshake). The proxy's own
+    rejections have an empty body."""
+    return jupyter_error(body) is not None or b"Jupyter Server" in (body or b"")
+
+
+def body_head(body, info=None) -> str:
+    """First BODY_HEAD characters of an upstream response body, safe to log."""
+    text = (body or b"").decode("utf-8", "replace") if isinstance(body, bytes) else str(body or "")
+    if info is not None and info.token:
+        text = text.replace(info.token, "***")
+    if text.lstrip().startswith("<"):  # HTML error page: keep the visible text
+        text = re.sub(r"(?is)<(head|script|style)\b.*?</\1>|<[^>]+>", " ", text)
+    text = " ".join(scrub(text).split())
+    return repr(text[:BODY_HEAD] + ("…" if len(text) > BODY_HEAD else ""))
 
 
 def parse_frame(msg) -> Optional[dict]:
@@ -154,9 +198,19 @@ class _Auth:
     def colab(self) -> ColabSession:
         return self._settings()["colab_session"]
 
+    @property
+    def watch(self) -> "RuntimeWatch":
+        return self._settings()["runtime_watch"]
+
     def _schedule_liveness_check(self):
-        """Let the CLI tell us whether the session still exists (throttled)."""
+        """Let the CLI tell us whether the session still exists (at most every LIVENESS_INTERVAL)."""
         colab = self.colab
+        settings = self._settings()
+        now = time.monotonic()
+        last = settings.get("_last_liveness_check")
+        if last is not None and now - last < settings.get("liveness_interval", LIVENESS_INTERVAL):
+            return
+        settings["_last_liveness_check"] = now
 
         async def check():
             try:
@@ -167,6 +221,21 @@ class _Auth:
                 log.exception("liveness check failed")
 
         asyncio.ensure_future(check())
+
+
+    def _schedule_token_refresh(self):
+        """Get the current proxy URL/token from the CLI (throttled by ColabSession)."""
+        colab = self.colab
+
+        async def refresh():
+            try:
+                await colab.refresh()
+            except (SessionGone, SessionFormatError):
+                pass
+            except Exception:
+                log.exception("token refresh failed")
+
+        asyncio.ensure_future(refresh())
 
 
 class RestHandler(_Auth, web.RequestHandler):
@@ -233,15 +302,21 @@ class RestHandler(_Auth, web.RequestHandler):
             try:
                 resp = await httpclient.AsyncHTTPClient().fetch(req, raise_error=False)
             except Exception as e:  # DNS errors etc.; log the type only
-                log.warning("upstream request failed: %s", type(e).__name__)
+                log.warning("upstream request failed: %s %s: %s", method, self.request.path, type(e).__name__)
                 self._schedule_liveness_check()
                 raise BridgeError(502, MSG_UNREACHABLE)
             if resp.code == 599:
-                log.warning("upstream unreachable: %s", type(resp.error).__name__)
+                log.warning("upstream unreachable: %s %s: %s", method, self.request.path, type(resp.error).__name__)
                 self._schedule_liveness_check()
                 raise BridgeError(502, MSG_UNREACHABLE)
-            if resp.code in (401, 403) and attempt == 0:
-                # Proxy token may have been rotated or expired early; refresh once and retry.
+            proxy_404 = resp.code == 404 and not from_jupyter(resp.body)
+            if (resp.code in (401, 403) or proxy_404) and attempt == 0:
+                # The proxy rejected the token (it answers 404 with an empty body, not 401):
+                # get the current proxy URL/token from the CLI and retry once.
+                log.warning(
+                    "upstream %s %s: proxy answered %d body=%s; refreshing the proxy token and retrying",
+                    method, self.request.path, resp.code, body_head(resp.body, info),
+                )
                 try:
                     info = await self.colab.refresh()
                 except SessionGone:
@@ -251,13 +326,26 @@ class RestHandler(_Auth, web.RequestHandler):
                 continue
             break
 
-        if 300 <= resp.code < 400 or resp.code in (401, 403):
+        answered_by_jupyter = from_jupyter(resp.body)
+        if resp.code >= 400:
+            log.warning("upstream %s %s -> %d body=%s", method, self.request.path, resp.code, body_head(resp.body, info))
+        if 300 <= resp.code < 400 or resp.code in (401, 403) or (resp.code == 404 and not answered_by_jupyter):
             # Redirects (e.g. to a Google login page) or auth failures mean the
             # runtime is no longer usable through this session.
             self._schedule_liveness_check()
             raise BridgeError(502, MSG_UNREACHABLE)
-        if resp.code >= 500:
-            self._schedule_liveness_check()
+        if resp.code >= 500 and not answered_by_jupyter:
+            self._schedule_liveness_check()  # the proxy, not the Jupyter Server, failed
+        kernel_id = self.request.path.split("/")[3] if self.request.path.startswith("/api/kernels/") else None
+        if resp.code == 404 and kernel_id:
+            self.watch.kernel_lost(kernel_id, f"{method} {resp.code}")
+        elif method == "POST" and self.request.path == "/api/kernels" and resp.code == 201:
+            try:
+                new_id = json.loads(resp.body).get("id")
+            except Exception:
+                new_id = None
+            if isinstance(new_id, str):
+                self.watch.known.add(new_id)
 
         self.set_status(resp.code, reason=resp.reason or "Upstream")
         for name in PASS_RESPONSE_HEADERS:
@@ -331,15 +419,22 @@ class ChannelsHandler(_Auth, websocket.WebSocketHandler):
         self._kernel_id = kernel_id
         self._pending: list = []  # browser messages received while reconnecting upstream
         self.reconnects = 0
+        if kernel_id in self.watch.gone:
+            # Already known to be gone (Colab said so): do not hammer the proxy again.
+            self.close(1011, "kernel not found")
+            return
         try:
             await self.colab.current()
         except SessionGone:
             self.close(1011, "colab runtime terminated")
             return
-        self.upstream = await self._connect_upstream()
+        # tornado calls on_message only after open() returns, so nothing is lost while retrying.
+        self.upstream = await self._connect_with_retry()
         if self.upstream is None:
-            self.close(1011, "colab runtime unreachable")
+            if not self._client_closed:
+                self.close(1011, "kernel not found" if kernel_id in self.watch.gone else "colab runtime unreachable")
             return
+        self.watch.known.add(kernel_id)
         self._pump_task = asyncio.ensure_future(self._pump())
         self._heartbeat_task = asyncio.ensure_future(self._heartbeat(kernel_id))
         self._schedule_debug_drop()
@@ -365,11 +460,9 @@ class ChannelsHandler(_Auth, websocket.WebSocketHandler):
 
         asyncio.ensure_future(drop())
 
-    async def _connect_upstream(self) -> Optional[websocket.WebSocketClientConnection]:
-        try:
-            info = await self.colab.current()
-        except SessionGone:
-            return None
+    async def _connect_once(self, info):
+        """(connection, status, kernel_gone). status is the HTTP status of a refused
+        handshake, None for timeouts and network errors."""
         # Everything but the LMS token is passed through, in particular `session_id`:
         # the Jupyter Server keys its reconnect buffer on (kernel_id, session_id).
         params = _strip_token(self.request.query_arguments) + [(PROXY_TOKEN_QUERY, info.token)]
@@ -381,42 +474,82 @@ class ChannelsHandler(_Auth, websocket.WebSocketHandler):
             request_timeout=CONNECT_TIMEOUT,
         )
         try:
-            return await websocket.websocket_connect(
+            conn = await websocket.websocket_connect(
                 req,
                 ping_interval=None,
                 max_message_size=MAX_MESSAGE_SIZE,
             )
+            return conn, None, False
+        except httpclient.HTTPClientError as e:
+            # Never log str(e.response) or its effective_url: the query carries the proxy token.
+            body = e.response.body if e.response is not None else b""
+            gone = e.code == 404 and from_jupyter(body)
+            log.warning("upstream websocket connect failed: HTTP %d body=%s", e.code, body_head(body, info))
+            return None, e.code, gone
         except Exception as e:
-            # Exceptions may carry the upstream URL (with the proxy token); log the type only.
+            # Other exceptions may carry the upstream URL (with the proxy token); log the type only.
             log.warning("upstream websocket connect failed: %s", type(e).__name__)
-            self._schedule_liveness_check()
-            return None
+            return None, None, False
+
+    async def _connect_with_retry(self) -> Optional[websocket.WebSocketClientConnection]:
+        """Open the Colab side with backoff (RECONNECT_DELAYS); None if it cannot be opened.
+
+        Each attempt first asks ``GET /api/kernels/<id>`` and opens the WebSocket only if the
+        kernel exists. Measured 2026-11-07 (T4, 3 of 3): a WebSocket to a kernel that does not
+        exist passes the Colab proxy handshake (101), and some 20-80 s later the whole Colab
+        runtime container restarts, taking every kernel and file with it. A WebSocket to an
+        existing kernel does not. Attempts stop once the Colab Jupyter Server says the kernel
+        does not exist. A request the proxy itself rejected (empty-body 404, 401/403) gets
+        the current proxy URL/token from the CLI before the next attempt.
+        """
+        attempts = len(RECONNECT_DELAYS)
+        for n, delay in enumerate(RECONNECT_DELAYS, 1):
+            await asyncio.sleep(delay)
+            if self._client_closed or self.colab.gone:
+                return None
+            try:
+                info = await self.colab.current()
+            except (SessionGone, SessionFormatError):
+                return None
+            code, body = await upstream_get(info, f"/api/kernels/{self._kernel_id}", HEARTBEAT_TIMEOUT)
+            if code == 404 and from_jupyter(body):
+                log.warning("kernel %s does not exist on Colab; not opening a websocket", self._kernel_id[:8])
+                self.watch.kernel_lost(self._kernel_id, "kernel 404 on connect")
+                return None
+            if code == 200:
+                upstream, status, gone = await self._connect_once(info)
+                if upstream is not None:
+                    if self._client_closed:
+                        upstream.close()
+                        return None
+                    return upstream
+                if gone:
+                    self.watch.kernel_lost(self._kernel_id, "websocket 404")
+                    return None
+            else:
+                status = code
+                log.warning("upstream GET kernel before connecting -> %s body=%s", code, body_head(body, info))
+            log.warning("upstream websocket attempt %d/%d failed", n, attempts)
+            if status in (401, 403, 404):
+                try:
+                    await self.colab.refresh()
+                except (SessionGone, SessionFormatError):
+                    return None
+            else:
+                self._schedule_liveness_check()
+        return None
 
     async def _reconnect_upstream(self) -> bool:
         """Reopen the Colab side after an unexpected close; False if it cannot be restored."""
-        for delay in RECONNECT_DELAYS:
-            await asyncio.sleep(delay)
-            if self._client_closed or self.colab.gone:
-                return False
-            try:
-                info = await self.colab.current()
-            except SessionGone:
-                return False
-            if await upstream_status(info, f"/api/kernels/{self._kernel_id}", HEARTBEAT_TIMEOUT) == 404:
-                return False  # kernel is gone; reconnecting would only create confusion
-            upstream = await self._connect_upstream()
-            if upstream is None:
-                continue
-            if self._client_closed:
-                upstream.close()
-                return False
-            self.upstream = upstream
-            self.reconnects += 1
-            pending, self._pending = self._pending, []
-            for message in pending:
-                await upstream.write_message(message, binary=isinstance(message, bytes))
-            return True
-        return False
+        upstream = await self._connect_with_retry()
+        if upstream is None:
+            return False
+        self.upstream = upstream
+        self.reconnects += 1
+        pending, self._pending = self._pending, []
+        for message in pending:
+            await upstream.write_message(message, binary=isinstance(message, bytes))
+        return True
 
     async def _heartbeat(self, kernel_id):
         """Close the relay when the Colab runtime stops answering, so the browser never hangs."""
@@ -427,18 +560,29 @@ class ChannelsHandler(_Auth, websocket.WebSocketHandler):
                 return
             if self.upstream is None:
                 continue  # reconnecting
+            body = b""
             try:
                 info = await self.colab.current()
-                code = await upstream_status(info, f"/api/kernels/{kernel_id}", HEARTBEAT_TIMEOUT)
-            except SessionGone:
-                code, failures = None, HEARTBEAT_FAILURES
+                code, body = await upstream_get(info, f"/api/kernels/{kernel_id}", HEARTBEAT_TIMEOUT)
+            except (SessionGone, SessionFormatError):
+                info, code, failures = None, None, HEARTBEAT_FAILURES
             if code == 200:
                 failures = 0
                 continue
+            gone = code == 404 and from_jupyter(body)
             failures += 1
-            if code == 404 or failures >= HEARTBEAT_FAILURES:
-                log.warning("colab runtime not responding (status=%s); closing websocket", code)
-                self._schedule_liveness_check()
+            if code is not None:
+                log.warning("heartbeat: upstream GET kernel -> %d body=%s", code, body_head(body, info))
+            if code in (401, 403, 404) and not gone:
+                self._schedule_token_refresh()  # the proxy rejected the token (①)
+            if gone:
+                self.watch.kernel_lost(kernel_id, "heartbeat 404")
+            if gone or failures >= HEARTBEAT_FAILURES:
+                if gone:
+                    log.warning("kernel %s is gone on Colab; closing websocket", kernel_id[:8])
+                else:
+                    log.warning("colab runtime not responding (status=%s); closing websocket", code)
+                    self._schedule_liveness_check()
                 if self.upstream is not None:
                     self.upstream._lms_closed_by_bridge = True
                     self.upstream.close()  # _pump then closes the browser side with 1011
@@ -478,7 +622,8 @@ class ChannelsHandler(_Auth, websocket.WebSocketHandler):
                     log.warning("upstream websocket reconnected in %.1fs", time.monotonic() - started)
                     continue
             break
-        self._schedule_liveness_check()
+        if self._kernel_id not in self.watch.gone:  # a gone kernel says nothing about the session
+            self._schedule_liveness_check()
         if not self._client_closed:
             self.close(1011, "colab runtime disconnected")
 
@@ -547,8 +692,22 @@ class HelperInstaller:
             return None
         return None if resp.code == 599 else resp.code
 
+    async def _missing(self) -> bool:
+        """True if the copied helpers are gone, i.e. the Colab runtime container was restarted
+        with a fresh filesystem (measured 2026-11-07). One small request per kernel start."""
+        try:
+            info = await self.colab.current()
+        except Exception:
+            return False
+        prefix = self.target.strip("/") + "/" if self.target and self.target != "/" else ""
+        if await self._contents(info, "GET", f"{prefix}lms_kernel/frontend.py?content=0") == 404:
+            log.warning("kernel helpers are missing on the Colab runtime; copying them again")
+            self.done = False
+            return True
+        return False
+
     async def ensure(self) -> bool:
-        if self.done:
+        if self.done and not await self._missing():
             return True
         async with self._lock:
             if self.done:
@@ -587,6 +746,102 @@ class HelperInstaller:
             return False
 
 
+class RuntimeWatch:
+    """Explains lost kernels: logs what the Colab VM shows and tells the student when the
+    runtime container restarted (CLAUDE.md 3장, measured 2026-11-07).
+
+    ``known`` holds kernels seen alive through this bridge, ``gone`` those the Colab
+    Jupyter Server reported as missing (WebSockets to them are closed without contacting
+    Colab again). Diagnostics are read at most every DIAG_INTERVAL seconds.
+    """
+
+    MAX_IDS = 512
+
+    def __init__(self, colab_session: ColabSession, helper_installer: Optional["HelperInstaller"] = None,
+                 diag_interval: float = DIAG_INTERVAL):
+        self.colab = colab_session
+        self.installer = helper_installer
+        self.diag_interval = diag_interval
+        self.known: set[str] = set()
+        self.gone: set[str] = set()
+        self.container_start = None
+        self.oom_kill: Optional[int] = None
+        self.restarts = 0
+        self._last_diag: Optional[float] = None
+        self._lock = asyncio.Lock()
+
+    async def baseline(self) -> None:
+        """Remember the current container start and OOM count (called at bridge start)."""
+        info = self.colab.info  # never runs the CLI
+        if info is None:
+            return
+        snap = await snapshot(info)
+        self.container_start = snap.container_start or self.container_start
+        self.oom_kill = snap.oom_kill if snap.oom_kill is not None else self.oom_kill
+
+    def kernel_lost(self, kernel_id: str, reason: str) -> None:
+        """Record that Colab no longer has `kernel_id`; diagnose if the bridge knew it."""
+        if kernel_id in self.gone:
+            return
+        if len(self.gone) >= self.MAX_IDS:
+            self.gone.clear()
+        self.gone.add(kernel_id)
+        if kernel_id not in self.known:
+            return  # e.g. a kernel id the browser kept from an earlier runtime
+        self.known.discard(kernel_id)
+        asyncio.ensure_future(self._diagnose(kernel_id, reason))
+
+    async def _diagnose(self, kernel_id: str, reason: str) -> None:
+        async with self._lock:
+            now = time.monotonic()
+            if self._last_diag is not None and now - self._last_diag < self.diag_interval:
+                log.warning("kernel %s is gone on Colab (%s)", kernel_id[:8], reason)
+                return
+            self._last_diag = now
+            info = self.colab.info  # never runs the CLI
+            if info is None:
+                log.warning("kernel %s is gone on Colab (%s); no diagnostics", kernel_id[:8], reason)
+                return
+            snap = await snapshot(info)
+            restarted = (
+                snap.container_start is not None and self.container_start is not None
+                and abs((snap.container_start - self.container_start).total_seconds()) > 1
+            )
+            new_ooms = (
+                snap.oom_kill - self.oom_kill
+                if snap.oom_kill is not None and self.oom_kill is not None else 0
+            )
+            log.warning(
+                "kernel %s is gone on Colab (%s): %s%s", kernel_id[:8], reason, snap.summary(),
+                " runtime_restarted=yes" if restarted else "",
+            )
+            if snap.container_start is not None:
+                self.container_start = snap.container_start
+            if snap.oom_kill is not None:
+                self.oom_kill = snap.oom_kill
+            if restarted:
+                self.restarts += 1
+                self.known.clear()  # every kernel of the old container is gone
+                if self.installer is not None:
+                    self.installer.done = False  # the container filesystem was reset too
+                local = snap.container_start.astimezone().strftime("%H:%M:%S")
+                print(
+                    f"\n[lms-runtime] Colab 런타임이 {local}에 재시작되었습니다(VM 할당은 그대로입니다). "
+                    "실행 중이던 커널과 런타임에 저장한 파일(내려받은 모델 포함)이 지워졌습니다.\n"
+                    "  LMS에서 새 커널로 이어서 실행하세요. 재시작은 Colab 쪽에서 일어났습니다"
+                    + (f"(메모리 부족 종료 {new_ooms}회)." if new_ooms > 0 else "(메모리 부족 기록 없음)."),
+                    file=sys.stderr,
+                    flush=True,
+                )
+            elif new_ooms > 0:
+                print(
+                    f"\n[lms-runtime] Colab 런타임에서 메모리 부족으로 프로세스가 {new_ooms}회 종료되었습니다. "
+                    "모델이나 배치 크기를 줄여 보세요.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+
 def make_app(
     origin: str,
     token: str,
@@ -615,6 +870,7 @@ def make_app(
         debug_drop_upstream_after=debug_drop_upstream_after,
         reply_dropper=ReplyDropper() if debug_drop_reply_once else None,
         helper_installer=helper_installer,
+        runtime_watch=RuntimeWatch(colab_session, helper_installer),
         log_function=_log_request,
         websocket_max_message_size=MAX_MESSAGE_SIZE,
         websocket_ping_interval=None,
@@ -636,7 +892,9 @@ def start(
         origin, token, colab_session, upstream_reconnect, debug_drop_upstream_after,
         debug_drop_reply_once, helper_installer,
     )
-    return app.listen(port, address="127.0.0.1")
+    server = app.listen(port, address="127.0.0.1")
+    asyncio.ensure_future(app.settings["runtime_watch"].baseline())
+    return server
 
 
 async def keep_fresh(colab_session: ColabSession, interval: float = 15.0) -> None:
@@ -712,6 +970,22 @@ async def upstream_json(info, path: str, timeout: float):
         return json.loads(resp.body) if resp.code == 200 else None
     except Exception:
         return None
+
+
+async def upstream_get(info, path: str, timeout: float) -> tuple[Optional[int], bytes]:
+    """(status, body) of GET <path> on the Colab runtime; status None if unreachable."""
+    req = httpclient.HTTPRequest(
+        info.url + path,
+        headers={PROXY_TOKEN_HEADER: info.token, "Accept": "application/json"},
+        follow_redirects=False,
+        connect_timeout=timeout,
+        request_timeout=timeout,
+    )
+    try:
+        resp = await httpclient.AsyncHTTPClient().fetch(req, raise_error=False)
+    except Exception:
+        return None, b""
+    return (None, b"") if resp.code == 599 else (resp.code, resp.body or b"")
 
 
 async def upstream_status(info, path: str, timeout: float) -> Optional[int]:

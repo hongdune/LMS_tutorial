@@ -1,6 +1,6 @@
 [project]
 name = "lms-kernel"
-version = "0.6.0"
+version = "0.6.1"
 description = "Student-side runtime helpers for the interactive deep learning LMS"
 requires-python = ">=3.10"
 dependencies = [
