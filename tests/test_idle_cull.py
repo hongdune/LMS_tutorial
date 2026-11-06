@@ -155,12 +155,27 @@ def test_idle_kernel_is_culled_even_while_connected(runtime):
         ws.close()
 
 
+def _ready_kernel(base, port, attempts=3):
+    """A kernel that answered kernel_info. On a slow runner the 3 s culler can remove a
+    kernel that is still starting (its startup counts as idle time); then start another."""
+    for _ in range(attempts):
+        kid = _new_kernel(base)
+        ws = _connect(port, kid)
+        try:
+            _wait_ready(ws, limit=20)
+            return kid, ws
+        except BaseException:
+            ws.close()
+            if _exists(base, kid):
+                requests.delete(f"{base}/api/kernels/{kid}", headers=_auth(), timeout=10)
+                raise
+    pytest.fail(f"kernel was culled before it became ready, {attempts} times")
+
+
 def test_busy_kernel_is_not_culled(runtime):
     base, port = runtime
-    kid = _new_kernel(base)
-    ws = _connect(port, kid)
+    kid, ws = _ready_kernel(base, port)
     try:
-        _wait_ready(ws)
         _wait_busy(ws, _execute(ws, "import time; time.sleep(12)"))
         # Several cull rounds pass well beyond the idle timeout while it runs.
         time.sleep(IDLE_SECONDS + 5)

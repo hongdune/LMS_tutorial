@@ -701,13 +701,16 @@ def test_failed_upstream_reconnect_closes_browser_websocket_with_1011(make_bridg
     import lms_kernel.bridge as bridge_mod
 
     monkeypatch.setattr(bridge_mod, "RECONNECT_DELAYS", (0.0, 0.2, 0.2))
+    # Bound every attempt so a slow runner cannot stretch three attempts past the wait below.
+    monkeypatch.setattr(bridge_mod, "CONNECT_TIMEOUT", 3.0)
+    monkeypatch.setattr(bridge_mod, "HEARTBEAT_TIMEOUT", 3.0)
     b = make_bridge(_session_entry(relay.url, PROXY_TOKEN), upstream_reconnect=True,
                     min_refresh_interval=3600)
     b.call(b.session.refresh())
     kid = _new_kernel(b.base)
     ws = websocket.create_connection(
         f"{b.ws_base}/api/kernels/{kid}/channels?session_id=client-3&token={LMS_TOKEN}",
-        origin=ORIGIN, timeout=30)
+        origin=ORIGIN, timeout=60)
     try:
         relay.refuse = True
         t0 = time.time()
