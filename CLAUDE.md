@@ -297,12 +297,16 @@ python3 -m venv .venv
     - local: 자식 서버는 `--LMSServerApp.ignore_sigint=True`(`server.py`)로 SIGINT를 무시하고, `run_local()`이 SIGTERM으로 끈다(15초 뒤 SIGKILL). 커널은 jupyter_client가 새 세션으로 띄우므로 Ctrl+C가 실행 중인 셀을 중단하지 않는다. `lms-runtime`이 SIGTERM·SIGHUP을 받아도 자식을 끈다
     - colab: `loop.add_signal_handler(SIGINT)`. 등록 정보 출력 전의 Ctrl+C는 지금처럼 바로 종료한다
   - Jupyter가 포트가 사용 중이면 다음 포트로 옮겨서, 출력한 URL과 실제 포트가 달라질 수 있었다. `--ServerApp.port_retries=0`으로 막고, 서버가 오류로 끝나면 한국어 안내를 출력한다
-  - 필수 의존성에 `ipywidgets>=8` 추가: `tqdm.auto`(transformers·huggingface_hub)의 "IProgress not found" 경고를 없애고 위젯 진행 막대를 쓰게 한다. LMS 화면이 위젯 8.x 메시지를 처리한다. **Colab(2026-11-06 CPU)에는 ipywidgets 7.7.1**(`__protocol_version__` 2.1.0), widgetsnbextension 3.6.10, ipykernel 6.17.1이 있다. 런타임은 Colab에 패키지를 설치하지 않으므로 Colab의 위젯 표시는 LMS 세션이 확인한다. 계약에 넣을지(0.11)는 LMS 세션과 정한다
+  - 필수 의존성에 `ipywidgets>=8` 추가: `tqdm.auto`(transformers·huggingface_hub)의 "IProgress not found" 경고를 없애고 위젯 진행 막대를 쓰게 한다. LMS 화면이 위젯 8.x 메시지를 처리한다. **Colab(2026-11-06 CPU)에는 ipywidgets 7.7.1**(`__protocol_version__` 2.1.0), widgetsnbextension 3.6.10, ipykernel 6.17.1이 있다. 런타임은 Colab에 패키지를 설치하지 않으므로 Colab의 위젯 표시는 LMS 세션이 확인한다. 계약 0.11에 반영됐다(아래)
   - 테스트: `tests/test_interrupt.py`(프로세스 그룹에 SIGINT: 한 번이면 서버·커널 유지, 5초 지나면 다시 첫 번째, 두 번이면 종료 0·포트 닫힘·커널 종료), colab 모드 같은 시험, `build_command` 인자
+
+- 2026-11-07 (WSL) 계약 v0.11
+  - `docs/runtime-contract.md`를 v0.11(LMS 0dabff6)로 갱신하고 `diff`로 원본과 같은지 확인했다. 패키지 버전 0.5.0, `info()`의 `contract`는 `"0.11"`
+  - 4장 위젯: local은 `ipywidgets>=8`(이미 필수 의존성), Colab은 이미지 버전(7.7.1). LMS가 7.7.1·ipykernel 6.17.1 실제 커널로 tqdm 메시지를 확인했다. Colab 브라우저에서 다운로드 막대가 움직이는지는 아직 확인하지 않았다(다음 작업 2번에 포함)
 
 ### 다음 작업 (WSL, 우선순위 순)
 1. **브리지 첫 업스트림 연결 재시도**: `bridge.ChannelsHandler.open()`은 `_connect_upstream()`이 한 번 실패하면(Colab 프록시 WS 핸드셰이크 시간 초과, 3장) 바로 1011로 닫는다. 끊김 복구처럼 `RECONNECT_DELAYS`로 다시 시도하게 한다. tornado는 `open()`이 끝날 때까지 `on_message`를 부르지 않으므로 메시지 보관은 필요 없다. 가짜 업스트림에서 첫 WS 연결만 실패시키는 테스트를 같이 만든다. `CONNECT_TIMEOUT`(15초)을 줄일지도 검토한다(핸드셰이크가 늦을 때 전체 대기가 길어진다)
-2. **Colab 브라우저 확인**: https://lms.132-145-125-71.sslip.io/courses/transformer/1 과 `/runtime-test`에서 `lms-runtime --colab` URL/Token으로 확인한다
+2. **Colab 브라우저 확인**: https://lms.132-145-125-71.sslip.io/courses/transformer/1 과 `/runtime-test`에서 `lms-runtime --colab` URL/Token으로 확인한다. GPT·BERT 코스에서 모델 다운로드 진행 막대(ipywidgets 7.7.1)가 움직이는지도 본다
 3. **LMS 세션에 재측정 결과 전달**: 3장 "WS 끊김"의 재측정 요약을 보낸다(1번을 고친 뒤면 그 결과도). "베타" 표시와 googlecolab 문의 정리는 LMS 세션이 정한다
 4. **v0.10 브라우저 확인**: LMS 런타임 상태 화면에서 local·Colab 각각 `/lms/runtime`, Colab 사용량 "조회", `resources()` 표시를 확인한다
 

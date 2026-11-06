@@ -1,6 +1,6 @@
 # LMS ↔ 학생 런타임 인터페이스 계약
 
-- 버전: **0.10** (2026-11-05)
+- 버전: **0.11** (2026-11-06)
 - 원본: `hongdune/LMS`의 `docs/runtime-contract.md`. `hongdune/LMS_tutorial`에는 같은 내용의 사본을 둔다.
 - 변경 절차: 내용을 바꾸면 버전을 올리고 아래 변경 기록에 한 줄을 남긴 뒤, 두 저장소의 파일을 **같은 내용으로** 갱신한다. 한쪽만 바뀐 상태로 커밋하지 않는다.
 - "결정 대기"로 표시한 항목은 한쪽에서 임의로 정하지 않는다. 정할 때는 이 문서부터 고친다.
@@ -97,6 +97,7 @@
 ## 4. 커널 안 헬퍼 (`lms_kernel`)
 
 - 학생 런타임의 커널 환경에는 `lms_kernel` 패키지가 설치되어 있어야 한다. 프론트가 부르는 함수는 모두 `lms_kernel.frontend` 모듈에 둔다.
+- 위젯(v0.11): local 런타임은 `ipywidgets>=8`을 함께 설치한다. 없으면 `tqdm.auto`가 "IProgress not found" 경고를 내고 텍스트 막대로 바뀐다. Colab 런타임의 위젯 버전은 Colab 이미지를 따른다(2026-11 기준 7.7.1). 프론트는 comm 대상 `jupyter.widget`의 `comm_open`(`data.state`)과 `comm_msg`(`method`: `update`·`echo_update`)만 쓰고 모델 버전은 보지 않으므로 둘 다 그린다(7.7.1의 tqdm 메시지는 LMS에서 실제 ipykernel 6.17.1로 확인, 2026-11-06).
 - Colab(`--colab`): 브리지가 시작할 때 표준 Contents API로 헬퍼 파일(`lms_kernel/{__init__,frontend,viz}.py`, `lms_viz/__init__.py`)만 Colab VM에 복사한다. 그래서 Colab 커널의 헬퍼 버전은 항상 브리지와 같다. 브라우저 쪽에는 `/api/contents`를 열지 않는다(2장의 경로 목록 그대로).
 - 학생 네임스페이스에 이름을 남기지 않는다. 헬퍼가 어쩔 수 없이 이름을 만들어야 하면 `_lms_` 접두사를 쓴다.
 
@@ -238,6 +239,7 @@
 
 ## 변경 기록
 
+- 0.11 (2026-11-06): 위젯 의존성(4장) — local 런타임은 `ipywidgets>=8` 설치, Colab은 이미지 버전(7.7.1)을 따름. 근거(LMS_tutorial 실측): 로컬 venv에 ipywidgets가 없어 tqdm 경고, Colab CPU 런타임은 ipywidgets 7.7.1·ipykernel 6.17.1. 프론트 동작 변경 없음.
 - 0.10 (2026-11-05): 런타임 정보 `GET /lms/runtime`(2.2), Colab 사용량 `GET /lms/colab/usage`(2.3), 리소스 헬퍼 `resources()`(4.6), `runtime_kind`에 `colab` 추가(3장). 사용자 요청: 로컬·Colab 리소스 확인, Colab 크레딧·시간당 사용량, 켜진 세션 수. 프론트는 구현됨(0.10 이전 런타임에서는 해당 항목을 "업데이트 필요"로 표시). 2.3의 `raw: null`, `name: null`, `checked_at` 선택, 시간 제한, CLI 출력 참고는 LMS_tutorial 구현·실측(2026-11-06)에 맞춰 같은 버전 안에서 정했다(push 전).
 - 0.9 (2026-11-05): WebSocket 메시지의 `header.session`과 URL `session_id` 일치 규칙(2장), Colab 헬퍼 복사 방식(4장). 근거(LMS_tutorial 32c2e39 실측): 두 값이 같으면 5/5 유지, 다르면 2/2 끊김. 프론트 동작 변경 없음.
 - 0.1 (2026-11-03): 저장소 분리와 함께 최초 작성.

@@ -997,7 +997,7 @@ def test_runtime_info_answers_from_memory(bridge):
     assert r.status_code == 200
     assert r.headers["Access-Control-Allow-Origin"] == ORIGIN
     assert r.json() == {
-        "version": 1, "kind": "colab", "lms_runtime": "0.4.0", "contract": "0.10",
+        "version": 1, "kind": "colab", "lms_runtime": "0.5.0", "contract": "0.11",
         "colab": {"session": SESSION, "machine": "T4"},
     }
     assert r.elapsed.total_seconds() < 1
