@@ -712,6 +712,13 @@ def test_failed_upstream_reconnect_closes_browser_websocket_with_1011(make_bridg
         f"{b.ws_base}/api/kernels/{kid}/channels?session_id=client-3&token={LMS_TOKEN}",
         origin=ORIGIN, timeout=60)
     try:
+        # The browser handshake completes before the bridge's open() connects upstream.
+        # Wait for a round trip so the upstream connection exists (and is in relay.conns);
+        # otherwise it can slip past cut_all() and only the 60 s heartbeat closes the socket.
+        req = _msg("kernel_info_request", {})
+        ws.send(json.dumps(req))
+        while json.loads(ws.recv()).get("parent_header", {}).get("msg_id") != req["header"]["msg_id"]:
+            pass
         relay.refuse = True
         t0 = time.time()
         relay.cut_all()
