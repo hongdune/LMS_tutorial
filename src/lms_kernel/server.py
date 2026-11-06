@@ -2,7 +2,10 @@
 
 Identical to ``python -m jupyter_server`` except that
 - ``Access-Control-Allow-Origin`` is pinned on *every* response, including errors;
-- ``GET /lms/runtime`` (contract 2.2) tells the LMS which runtime and contract it talks to.
+- ``GET /lms/runtime`` (contract 2.2) tells the LMS which runtime and contract it talks to;
+- with ``--LMSServerApp.ignore_sigint=True`` (set by ``lms-runtime``) Ctrl+C in the terminal
+  is left to the parent ``lms-runtime`` process, which asks for a second Ctrl+C and then
+  stops this server with SIGTERM.
 
 Why: Jupyter Server sets CORS headers in ``prepare()`` (after authentication). When a
 handler raises (404 for an unknown kernel, 403 for a bad token, ...), tornado's
@@ -19,11 +22,13 @@ widen access: other origins still get 404 / WebSocket rejection from
 """
 
 import json
+import signal
 
 from jupyter_server.base.handlers import APIHandler
 from jupyter_server.serverapp import ServerApp
 from jupyter_server.utils import url_path_join
 from tornado import web
+from traitlets import Bool
 
 from .runtime_info import runtime_info
 
@@ -41,6 +46,15 @@ class RuntimeInfoHandler(APIHandler):
 
 
 class LMSServerApp(ServerApp):
+    ignore_sigint = Bool(
+        False, config=True, help="Ignore SIGINT; the parent lms-runtime handles Ctrl+C."
+    )
+
+    def init_signal(self):
+        super().init_signal()
+        if self.ignore_sigint:
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+
     def init_webapp(self):
         if self.allow_origin:
             headers = dict(self.tornado_settings.get("headers") or {})

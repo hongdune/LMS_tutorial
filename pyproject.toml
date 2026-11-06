@@ -7,6 +7,9 @@ dependencies = [
     "jupyter_server>=2.14",
     "ipykernel>=6.29",
     "packaging>=22",
+    # tqdm.auto (transformers, huggingface_hub) draws widget progress bars instead of
+    # warning "IProgress not found"; the LMS frontend renders ipywidgets 8 messages.
+    "ipywidgets>=8",
 ]
 
 [project.optional-dependencies]

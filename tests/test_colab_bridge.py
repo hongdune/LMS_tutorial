@@ -795,6 +795,35 @@ def test_cli_prints_registration_and_rejects_unknown_session(tmp_path, upstream)
         proc.wait(timeout=10)
 
 
+def test_cli_survives_one_ctrl_c_and_stops_on_two(tmp_path, upstream):
+    from test_interrupt import ctrl_c, spawn_runtime, wait_ready
+
+    path = tmp_path / "sessions.json"
+    _write(path, _session_entry(upstream, PROXY_TOKEN))
+    port = _free_port()
+    base = f"http://127.0.0.1:{port}"
+    err = tmp_path / "stderr.txt"
+    proc, token = spawn_runtime(
+        ["--origin", ORIGIN, "--colab-config", str(path), "--colab-bin", FAKE_CLI,
+         "--colab", SESSION, "--port", str(port)], err)
+    try:
+        wait_ready(base, token)
+        ctrl_c(proc)
+        time.sleep(0.5)
+        assert proc.poll() is None
+        assert requests.get(f"{base}/api/kernels", headers={"Authorization": f"token {token}"},
+                            timeout=30).status_code == 200
+        ctrl_c(proc)
+        assert proc.wait(timeout=30) == 0
+        assert "한 번 더" in err.read_text() and "종료합니다" in err.read_text()
+        with pytest.raises(requests.ConnectionError):
+            requests.get(f"{base}/api/kernels", timeout=2)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
 # --- kernel helpers on the Colab VM (contract 4) -------------------------------------------
 
 def test_helpers_are_copied_and_importable_in_upstream_kernel(make_bridge, upstream, upstream_root):

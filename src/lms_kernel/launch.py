@@ -14,8 +14,10 @@ import logging
 import os
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
+import time
 
 DEFAULT_ORIGIN = "http://localhost:3000"
 # Contract 2.1. Change the contract first if these defaults change.
@@ -42,9 +44,39 @@ COLAB_IDLE_STOPPED = (
     "이제 컴퓨트 유닛이 쓰이지 않습니다.\n"
     "  다시 쓰려면 `colab new -s {session}`으로 런타임을 새로 받은 뒤 lms-runtime을 다시 실행하세요."
 )
+# Ctrl+C is also what students press to copy the URL/Token from the terminal; when the
+# selection is lost it becomes SIGINT. One Ctrl+C only warns, a second one within
+# INTERRUPT_CONFIRM_SECONDS stops the runtime.
+INTERRUPT_CONFIRM_SECONDS = 5.0
+STOP_HINT = "종료하려면 Ctrl+C를 두 번 누르세요."
+INTERRUPT_NOTICE = (
+    "\n[lms-runtime] Ctrl+C를 받았습니다. 런타임은 계속 실행 중입니다. "
+    "종료하려면 {seconds}초 안에 Ctrl+C를 한 번 더 누르세요.\n"
+    "  등록 정보를 복사할 때는 드래그한 뒤 Ctrl+Shift+C 또는 마우스 오른쪽 버튼을 쓰세요."
+)
+INTERRUPT_STOPPING = "[lms-runtime] 종료합니다."
+LOCAL_STOP_TIMEOUT = 15.0
 ROOT_NOTICE = (
     "참고: root 계정으로 실행 중입니다. LMS에서 실행하는 코드도 root 권한으로 실행됩니다."
 )
+
+
+class InterruptGate:
+    """Decides whether a Ctrl+C stops the runtime: only a second one within the window."""
+
+    def __init__(self, window: float = INTERRUPT_CONFIRM_SECONDS, clock=time.monotonic):
+        self.window = window
+        self.clock = clock
+        self._first = None
+
+    def press(self) -> bool:
+        now = self.clock()
+        if self._first is not None and now - self._first <= self.window:
+            print(INTERRUPT_STOPPING, file=sys.stderr, flush=True)
+            return True
+        self._first = now
+        print(INTERRUPT_NOTICE.format(seconds=int(self.window)), file=sys.stderr, flush=True)
+        return False
 
 
 def running_as_root() -> bool:
@@ -63,10 +95,14 @@ def build_command(
         sys.executable, "-m", "lms_kernel.server",
         "--no-browser",
         f"--port={port}",
+        # The printed URL must be the real one: fail instead of moving to the next port.
+        "--ServerApp.port_retries=0",
         "--ServerApp.ip=127.0.0.1",
         f"--ServerApp.allow_origin={origin}",
         f"--IdentityProvider.token={token}",
         "--ServerApp.identity_provider_class=lms_kernel.auth.StrictOriginIdentityProvider",
+        # Ctrl+C reaches the whole foreground process group; run_local() decides.
+        "--LMSServerApp.ignore_sigint=True",
     ]
     if running_as_root() if allow_root is None else allow_root:
         # Jupyter refuses root by default, a guard meant for shared servers. This runtime only
@@ -170,19 +206,33 @@ def run_colab_bridge(args, token: str) -> int:
         if args.debug_drop_reply_once:
             print(DEBUG_DROP_REPLY_NOTICE, flush=True)
         print_registration(args.port, token)
-        print("종료하려면 Ctrl+C를 누르세요. Colab 런타임은 `colab stop`으로 따로 종료합니다.", flush=True)
+        print(f"{STOP_HINT} Colab 런타임은 `colab stop`으로 따로 종료합니다.", flush=True)
+        stop = asyncio.Event()
+        gate = InterruptGate()
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGINT, lambda: gate.press() and stop.set())
+
         async def idle_stop():
             if await stop_when_idle(session, idle * 60):
                 print(COLAB_IDLE_STOPPED.format(minutes=idle, session=args.colab), file=sys.stderr, flush=True)
 
-        idle_task = asyncio.ensure_future(idle_stop()) if idle > 0 else None
-        try:
+        async def serve():
             await keep_fresh(session)
             # Session is gone: keep answering 503 so the browser gets a clear error.
             await asyncio.Event().wait()
+
+        idle_task = asyncio.ensure_future(idle_stop()) if idle > 0 else None
+        serving = asyncio.ensure_future(serve())
+        stopping = asyncio.ensure_future(stop.wait())
+        try:
+            await asyncio.wait({serving, stopping}, return_when=asyncio.FIRST_COMPLETED)
+            if serving.done():
+                serving.result()  # surface an unexpected error
         finally:
-            if idle_task is not None:
-                idle_task.cancel()
+            loop.remove_signal_handler(signal.SIGINT)
+            for task in (serving, stopping, idle_task):
+                if task is not None:
+                    task.cancel()
             server.stop()
         return 0
 
@@ -258,14 +308,52 @@ def main() -> None:
     idle = DEFAULT_IDLE_TIMEOUT_MINUTES if args.idle_timeout is None else args.idle_timeout
     if idle > 0:
         print(f"{idle}분 동안 쓰지 않은 커널은 자동으로 종료됩니다 (--idle-timeout, 0이면 끔).", flush=True)
-    subprocess.run(
-        build_command(
-            args.origin, args.port, token,
-            debug_drop_reply_once=args.debug_drop_reply_once,
-            idle_timeout_minutes=idle,
-        ),
-        check=False,
-    )
+    print(STOP_HINT, flush=True)
+    code = run_local(build_command(
+        args.origin, args.port, token,
+        debug_drop_reply_once=args.debug_drop_reply_once,
+        idle_timeout_minutes=idle,
+    ))
+    if code != 0:
+        print(
+            f"[lms-runtime] Jupyter Server가 종료됐습니다(코드 {code}). 위 오류를 확인하세요. "
+            f"포트 {args.port}를 이미 쓰고 있다면 그 프로그램을 끄거나 --port로 다른 포트를 지정하세요.",
+            file=sys.stderr, flush=True,
+        )
+    sys.exit(code)
+
+
+def run_local(cmd: list[str]) -> int:
+    """Run the Jupyter Server child; it ignores SIGINT, this process asks for a second Ctrl+C."""
+    def on_signal(signum, frame):
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, on_signal)
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, on_signal)
+    gate = InterruptGate()
+    proc = subprocess.Popen(cmd)
+    try:
+        while True:
+            try:
+                return proc.wait()
+            except KeyboardInterrupt:
+                if gate.press():
+                    return 0
+    finally:
+        _stop_child(proc)
+
+
+def _stop_child(proc: subprocess.Popen) -> None:
+    """SIGTERM lets Jupyter Server shut its kernels down; SIGKILL if it hangs."""
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=LOCAL_STOP_TIMEOUT)
+    except (subprocess.TimeoutExpired, KeyboardInterrupt):
+        proc.kill()
+        proc.wait()
 
 
 if __name__ == "__main__":

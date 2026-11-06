@@ -49,3 +49,9 @@ def test_allow_root_follows_effective_user(monkeypatch):
     assert key in build_command("http://lms.example:3000", 8899, "t")
     monkeypatch.setattr("lms_kernel.launch.os.geteuid", lambda: 1000, raising=False)
     assert key not in build_command("http://lms.example:3000", 8899, "t")
+
+
+def test_ctrl_c_is_left_to_lms_runtime_and_port_is_fixed():
+    cmd = build_command("http://lms.example:3000", 8899, "t")
+    assert "--LMSServerApp.ignore_sigint=True" in cmd
+    assert "--ServerApp.port_retries=0" in cmd

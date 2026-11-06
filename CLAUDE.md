@@ -128,7 +128,7 @@ python3 -m venv .venv
 # 선택: torch·numpy가 있어야 하는 tests/test_frontend.py 테스트 9개는 없으면 건너뛴다([dev]에 없다)
 .venv/bin/pip install numpy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
 
-# 테스트 (현재 90개)
+# 테스트 (현재 94개)
 .venv/bin/pytest
 
 # 런타임 실행 (출력되는 URL/Token을 LMS에 등록)
@@ -290,6 +290,15 @@ python3 -m venv .venv
   - `resources()`(4.6, `frontend.py`): `nvidia-smi`(5초 제한, MiB→바이트, `[N/A]`→null), psutil이 없으면 `/proc/meminfo`(used=total−available)와 `percent: null`, `shutil.disk_usage(os.getcwd())`. torch·numpy를 import하지 않는다. 헬퍼 복사 목록은 그대로다
   - 테스트: 파서 단위 테스트(`tests/test_colab_usage.py`), 가짜 CLI에 `usage`·`sessions` 추가, 브리지·local 경로의 인증·Origin·preflight·405, 캐시, 502, 가짜 `nvidia-smi`(정상·실패·시간 초과), psutil 없음, torch 미import
   - 실측(T4): `/lms/runtime` 1ms 미만, `/lms/colab/usage` 첫 호출 1.8~3.3초·캐시 1ms 미만, 새 커널의 첫 `resources()` 1.7초·두 번째 0.2초, Tesla T4 16106127360바이트, torch 미import. 디스크 값의 의미는 3장
+
+- 2026-11-07 (WSL) Ctrl+C 두 번 종료, 포트 고정, ipywidgets
+  - 증상: 학생이 터미널에서 Token을 드래그해 Ctrl+C로 복사하다가 선택이 풀리면 SIGINT가 가서 런타임이 꺼졌다. local은 SIGINT가 프로세스 그룹 전체에 가고, `subprocess.run`이 0.25초 뒤 Jupyter Server를 강제 종료했다(Jupyter 자체의 y/n 확인도 소용없었다)
+  - 수정: `launch.InterruptGate`. 첫 Ctrl+C는 안내(5초 안에 한 번 더, Ctrl+Shift+C·오른쪽 클릭으로 복사)만 하고, 5초 안의 두 번째에 종료한다
+    - local: 자식 서버는 `--LMSServerApp.ignore_sigint=True`(`server.py`)로 SIGINT를 무시하고, `run_local()`이 SIGTERM으로 끈다(15초 뒤 SIGKILL). 커널은 jupyter_client가 새 세션으로 띄우므로 Ctrl+C가 실행 중인 셀을 중단하지 않는다. `lms-runtime`이 SIGTERM·SIGHUP을 받아도 자식을 끈다
+    - colab: `loop.add_signal_handler(SIGINT)`. 등록 정보 출력 전의 Ctrl+C는 지금처럼 바로 종료한다
+  - Jupyter가 포트가 사용 중이면 다음 포트로 옮겨서, 출력한 URL과 실제 포트가 달라질 수 있었다. `--ServerApp.port_retries=0`으로 막고, 서버가 오류로 끝나면 한국어 안내를 출력한다
+  - 필수 의존성에 `ipywidgets>=8` 추가: `tqdm.auto`(transformers·huggingface_hub)의 "IProgress not found" 경고를 없애고 위젯 진행 막대를 쓰게 한다. LMS 화면이 위젯 8.x 메시지를 처리한다. **Colab(2026-11-06 CPU)에는 ipywidgets 7.7.1**(`__protocol_version__` 2.1.0), widgetsnbextension 3.6.10, ipykernel 6.17.1이 있다. 런타임은 Colab에 패키지를 설치하지 않으므로 Colab의 위젯 표시는 LMS 세션이 확인한다. 계약에 넣을지(0.11)는 LMS 세션과 정한다
+  - 테스트: `tests/test_interrupt.py`(프로세스 그룹에 SIGINT: 한 번이면 서버·커널 유지, 5초 지나면 다시 첫 번째, 두 번이면 종료 0·포트 닫힘·커널 종료), colab 모드 같은 시험, `build_command` 인자
 
 ### 다음 작업 (WSL, 우선순위 순)
 1. **브리지 첫 업스트림 연결 재시도**: `bridge.ChannelsHandler.open()`은 `_connect_upstream()`이 한 번 실패하면(Colab 프록시 WS 핸드셰이크 시간 초과, 3장) 바로 1011로 닫는다. 끊김 복구처럼 `RECONNECT_DELAYS`로 다시 시도하게 한다. tornado는 `open()`이 끝날 때까지 `on_message`를 부르지 않으므로 메시지 보관은 필요 없다. 가짜 업스트림에서 첫 WS 연결만 실패시키는 테스트를 같이 만든다. `CONNECT_TIMEOUT`(15초)을 줄일지도 검토한다(핸드셰이크가 늦을 때 전체 대기가 길어진다)
