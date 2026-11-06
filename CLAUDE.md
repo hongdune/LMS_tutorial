@@ -328,4 +328,5 @@ python3 -m venv .venv
 4. **v0.10 브라우저 확인**: LMS 런타임 상태 화면에서 local·Colab 각각 `/lms/runtime`, Colab 사용량 "조회", `resources()` 표시를 확인한다
 
 개선 후보 (2026-11-03 정리, 우선순위 순. 계약을 건드리는 것은 LMS 세션과 먼저 합의한다)
+7. **CI 간헐 실패 추적**: `test_idle_stop_waits_for_busy_kernel_and_open_websocket_does_not_count`가 py3.10 러너에서 새 커널이 60초 동안 `kernel_info_request`에 답하지 않아 실패한 적이 있다(7833929, 다음 커밋에서는 통과). 원인 미확인. 실패하면 메시지(공개 annotation)에 가짜 업스트림의 커널 상태와 로그 줄이 실리므로(86c89b6) 그것으로 원인을 본다
 8. **googlecolab 이슈 후속**: 사용자가 제출한 두 이슈(로그의 자격증명, 서드파티 장시간 WS)의 URL을 3장에 적고, 답변에 따라 colab.log 경고와 WS 끊김 대책을 갱신한다
