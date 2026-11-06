@@ -442,6 +442,9 @@ def test_idle_stop_timer_restarts_on_kernel_activity(make_bridge, upstream):
         f"{b.ws_base}/api/kernels/{kid}/channels?token={LMS_TOKEN}&session_id={uuid.uuid4().hex}",
         origin=ORIGIN, timeout=30)
     try:
+        # Start the timer only once the kernel answers: on a slow runner a kernel that is
+        # still starting can outlast the 4s timeout, and the VM is returned mid-test.
+        _execute(ws, "1 + 1")
         fut = asyncio.run_coroutine_threadsafe(
             stop_when_idle(b.session, idle_timeout=4.0, poll_interval=0.2), b.loop)
         t0 = time.time()
