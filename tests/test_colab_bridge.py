@@ -189,6 +189,28 @@ def _msg(msg_type, content):
     }
 
 
+def _wait_ready(ws, limit=60):
+    """kernel_info_request until answered, like @jupyterlab/services. On a slow runner a
+    fresh kernel may not answer a request sent right after it starts (see test_idle_cull)."""
+    deadline = time.time() + limit
+    try:
+        while time.time() < deadline:
+            req = _msg("kernel_info_request", {})
+            ws.send(json.dumps(req))
+            ws.settimeout(2)
+            try:
+                while True:
+                    m = json.loads(ws.recv())
+                    if (m.get("parent_header", {}).get("msg_id") == req["header"]["msg_id"]
+                            and m["msg_type"] == "kernel_info_reply"):
+                        return
+            except websocket.WebSocketTimeoutException:
+                continue
+    finally:
+        ws.settimeout(30)
+    pytest.fail("kernel never answered kernel_info_request")
+
+
 def _execute(ws, code):
     req = _msg("execute_request", {"code": code, "silent": False, "store_history": True,
                                    "user_expressions": {}, "allow_stdin": False})
@@ -412,6 +434,7 @@ def test_idle_stop_waits_for_busy_kernel_and_open_websocket_does_not_count(make_
         f"{b.ws_base}/api/kernels/{kid}/channels?token={LMS_TOKEN}&session_id={uuid.uuid4().hex}",
         origin=ORIGIN, timeout=30)
     try:
+        _wait_ready(ws)
         _execute(ws, "import time")
         msg_id = _send_execute(ws, "time.sleep(4)")
         while True:  # wait until the kernel reports busy for this request
@@ -444,6 +467,7 @@ def test_idle_stop_timer_restarts_on_kernel_activity(make_bridge, upstream):
     try:
         # Start the timer only once the kernel answers: on a slow runner a kernel that is
         # still starting can outlast the 4s timeout, and the VM is returned mid-test.
+        _wait_ready(ws)
         _execute(ws, "1 + 1")
         fut = asyncio.run_coroutine_threadsafe(
             stop_when_idle(b.session, idle_timeout=4.0, poll_interval=0.2), b.loop)
