@@ -304,6 +304,10 @@ python3 -m venv .venv
   - `docs/runtime-contract.md`를 v0.11(LMS 0dabff6)로 갱신하고 `diff`로 원본과 같은지 확인했다. 패키지 버전 0.5.0, `info()`의 `contract`는 `"0.11"`
   - 4장 위젯: local은 `ipywidgets>=8`(이미 필수 의존성), Colab은 이미지 버전(7.7.1). LMS가 7.7.1·ipykernel 6.17.1 실제 커널로 tqdm 메시지를 확인했다. Colab 브라우저에서 다운로드 막대가 움직이는지는 아직 확인하지 않았다(다음 작업 2번에 포함)
 
+- 2026-11-07 (WSL) README Colab CLI 설치: root 계정에서 `colab`을 못 찾는 문제
+  - Ubuntu root의 `~/.profile`에는 `~/.local/bin`을 PATH에 넣는 코드가 없다(`/etc/skel/.profile`에만 있다). 그래서 `source ~/.profile`로는 root만 쓰는 WSL에서 PATH가 바뀌지 않았다
+  - README는 `~/.bashrc`에 PATH 줄을 한 번만 추가하고(grep으로 중복 방지) 현재 셸에서 `export`한다. root 형태의 임시 HOME에서 기존 단계 실패, 새 단계 성공, 새 로그인 셸 유지, 중복 없음을 확인했다
+
 ### 다음 작업 (WSL, 우선순위 순)
 1. **브리지 첫 업스트림 연결 재시도**: `bridge.ChannelsHandler.open()`은 `_connect_upstream()`이 한 번 실패하면(Colab 프록시 WS 핸드셰이크 시간 초과, 3장) 바로 1011로 닫는다. 끊김 복구처럼 `RECONNECT_DELAYS`로 다시 시도하게 한다. tornado는 `open()`이 끝날 때까지 `on_message`를 부르지 않으므로 메시지 보관은 필요 없다. 가짜 업스트림에서 첫 WS 연결만 실패시키는 테스트를 같이 만든다. `CONNECT_TIMEOUT`(15초)을 줄일지도 검토한다(핸드셰이크가 늦을 때 전체 대기가 길어진다)
 2. **Colab 브라우저 확인**: https://lms.132-145-125-71.sslip.io/courses/transformer/1 과 `/runtime-test`에서 `lms-runtime --colab` URL/Token으로 확인한다. GPT·BERT 코스에서 모델 다운로드 진행 막대(ipywidgets 7.7.1)가 움직이는지도 본다

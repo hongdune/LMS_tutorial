@@ -33,7 +33,9 @@ Colab GPU에서 코드를 실행하려면 Google의 [Colab CLI](https://github.c
 python3 -m venv ~/.colab-cli
 ~/.colab-cli/bin/pip install google-colab-cli==0.7.5
 mkdir -p ~/.local/bin && ln -sf ~/.colab-cli/bin/colab ~/.local/bin/colab
-source ~/.profile   # ~/.local/bin을 처음 만들었다면 PATH에 다시 읽어 들인다
+# ~/.local/bin을 PATH에 넣는다. root 계정의 ~/.profile은 이 폴더를 PATH에 넣지 않으므로 ~/.bashrc에 직접 적는다
+grep -qs 'HOME/.local/bin' ~/.bashrc || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+export PATH="$HOME/.local/bin:$PATH"   # 지금 열린 터미널에도 바로 적용
 colab version       # Version: 0.7.5 가 나오면 성공
 chmod 700 ~/.config/colab-cli   # 자격증명 보호 (아래 경고 참고)
 
