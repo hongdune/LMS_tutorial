@@ -114,7 +114,11 @@ main() {
     else
         printf '  lms-runtime --origin %s\n' "$site"
     fi
-    printf '  출력되는 URL과 Token을 LMS 사이트의 런타임 설정에 입력하세요.\n'
+    if [ -n "$origin" ]; then
+        printf '  출력되는 연결 링크를 Ctrl+클릭하면 LMS에 바로 등록됩니다(URL과 Token을 직접 입력해도 됩니다).\n'
+    else
+        printf '  출력되는 URL과 Token을 LMS 사이트의 런타임 설정에 입력하세요.\n'
+    fi
 }
 
 step() { printf '\n\033[1m[%s] %s\033[0m\n' "$1" "$2"; }

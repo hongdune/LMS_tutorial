@@ -18,6 +18,7 @@ import signal
 import subprocess
 import sys
 import time
+from urllib.parse import quote
 
 DEFAULT_ORIGIN = "http://localhost:3000"
 # Contract 2.1. Change the contract first if these defaults change.
@@ -123,10 +124,20 @@ def build_command(
     return cmd
 
 
-def print_registration(port: int, token: str) -> None:
+def connect_link(origin: str, url: str, token: str) -> str:
+    """Contract 2.4: the LMS registers the runtime from the fragment (never sent to a server)."""
+    return f"{origin.rstrip('/')}/runtime/connect#url={quote(url, safe='')}&token={quote(token, safe='')}"
+
+
+def print_registration(port: int, token: str, origin: str | None = None) -> None:
+    """URL and Token, plus the connect link (contract 2.4) when --origin was given."""
+    url = f"http://127.0.0.1:{port}"
     print("LMS 런타임 등록 정보 (LMS 사이트의 런타임 설정에 입력하세요)", flush=True)
-    print(f"  URL  : http://127.0.0.1:{port}", flush=True)
+    print(f"  URL  : {url}", flush=True)
     print(f"  Token: {token}", flush=True)
+    if origin:
+        print("  연결 링크 (Ctrl+클릭으로 열면 LMS에 바로 등록됩니다):", flush=True)
+        print(f"  {connect_link(origin, url, token)}", flush=True)
 
 
 def run_colab_bridge(args, token: str) -> int:
@@ -205,7 +216,7 @@ def run_colab_bridge(args, token: str) -> int:
         print(COLAB_NOTICE.format(session=args.colab, idle=idle_text), flush=True)
         if args.debug_drop_reply_once:
             print(DEBUG_DROP_REPLY_NOTICE, flush=True)
-        print_registration(args.port, token)
+        print_registration(args.port, token, args.origin_given)
         print(f"{STOP_HINT} Colab 런타임은 `colab stop`으로 따로 종료합니다.", flush=True)
         stop = asyncio.Event()
         gate = InterruptGate()
@@ -244,7 +255,10 @@ def run_colab_bridge(args, token: str) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Start the LMS student runtime")
-    parser.add_argument("--origin", default=DEFAULT_ORIGIN, help="LMS site origin allowed to connect")
+    parser.add_argument(
+        "--origin", default=None,
+        help=f"LMS site origin allowed to connect (default: {DEFAULT_ORIGIN}); also prints a connect link",
+    )
     parser.add_argument("--port", type=int, default=8888)
     parser.add_argument(
         "--idle-timeout",
@@ -291,6 +305,10 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+    # The connect link (contract 2.4) is printed only for an origin the student gave.
+    args.origin_given = args.origin
+    if args.origin is None:
+        args.origin = DEFAULT_ORIGIN
     if args.idle_timeout is not None and args.idle_timeout < 0:
         parser.error("--idle-timeout must be 0 or greater")
 
@@ -300,7 +318,7 @@ def main() -> None:
             args.idle_timeout = DEFAULT_COLAB_IDLE_TIMEOUT_MINUTES
         sys.exit(run_colab_bridge(args, token))
 
-    print_registration(args.port, token)
+    print_registration(args.port, token, args.origin_given)
     if running_as_root():
         print(ROOT_NOTICE, flush=True)
     if args.debug_drop_reply_once:

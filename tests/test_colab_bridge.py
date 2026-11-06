@@ -824,6 +824,10 @@ def test_cli_prints_registration_and_rejects_unknown_session(tmp_path, upstream)
         assert "예고 없이 종료될 수 있습니다" in notice
         assert f"colab stop -s {SESSION}" in notice
         token = [l for l in lines if l.startswith("  Token:")][0].split(":", 1)[1].strip()
+        proc.stdout.readline()  # connect link heading (contract 2.4)
+        link = proc.stdout.readline()
+        assert link == (f"  {ORIGIN}/runtime/connect#url=http%3A%2F%2F127.0.0.1%3A{port}"
+                        f"&token={token}\n")
         r = requests.get(f"http://127.0.0.1:{port}/api/kernels",
                          headers={"Authorization": f"token {token}"}, timeout=30)
         assert r.status_code == 200
@@ -1034,7 +1038,7 @@ def test_runtime_info_answers_from_memory(bridge):
     assert r.status_code == 200
     assert r.headers["Access-Control-Allow-Origin"] == ORIGIN
     assert r.json() == {
-        "version": 1, "kind": "colab", "lms_runtime": "0.5.0", "contract": "0.11",
+        "version": 1, "kind": "colab", "lms_runtime": "0.6.0", "contract": "0.12",
         "colab": {"session": SESSION, "machine": "T4"},
     }
     assert r.elapsed.total_seconds() < 1

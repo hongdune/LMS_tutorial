@@ -128,7 +128,7 @@ python3 -m venv .venv
 # 선택: torch·numpy가 있어야 하는 tests/test_frontend.py 테스트 9개는 없으면 건너뛴다([dev]에 없다)
 .venv/bin/pip install numpy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
 
-# 테스트 (현재 98개)
+# 테스트 (현재 101개)
 .venv/bin/pytest
 
 # 런타임 실행 (출력되는 URL/Token을 LMS에 등록)
@@ -314,6 +314,12 @@ python3 -m venv .venv
   - 실측: root 형태 임시 HOME에서 `--colab` 전체 설치 48초, 새 로그인 셸에서 두 명령 인식, 재실행 시 중복 없음, 설치된 런타임 403 응답, venv 없는 Python 안내
   - 테스트 `tests/test_install.py`: 이 체크아웃을 `--source`로 설치(네트워크 필요), 재실행, venv 없음 안내, 잘못된 옵션, CLI 버전 고정값이 `PINNED_CLI_VERSION`과 같은지
   - `PINNED_CLI_VERSION`을 바꾸면 `install.sh`의 `COLAB_CLI_VERSION`도 같이 바꾼다(테스트가 잡는다)
+
+- 2026-11-07 (WSL) 계약 v0.12: 연결 링크
+  - `docs/runtime-contract.md`를 v0.12(LMS 99b9f9a)로 갱신하고 `diff`로 원본과 같은지 확인했다. 패키지 버전 0.6.0, `info()`의 `contract`는 `"0.12"`
+  - 2.4 연결 링크: 학생이 `--origin`을 줬을 때만 URL·Token 아래에 `{origin}/runtime/connect#url=…&token=…`(`quote(v, safe="")`, origin 끝 `/`는 뗌)를 출력한다. `--origin` 기본값(`http://localhost:3000`)은 그대로지만 링크는 출력하지 않는다(`launch.connect_link`, `args.origin_given`). local·colab 모두
+  - 2장 토큰 없는 실행 여부 확인(403 + ACAO)은 이미 그렇게 동작한다(bd02413 때 실측). 4.2의 "런타임이 낮을 때만 안내"는 프론트 쪽 변경
+  - `install.sh`는 `--origin`을 받았으면 "연결 링크를 Ctrl+클릭" 안내를 출력한다
 
 ### 다음 작업 (WSL, 우선순위 순)
 1. **브리지 첫 업스트림 연결 재시도**: `bridge.ChannelsHandler.open()`은 `_connect_upstream()`이 한 번 실패하면(Colab 프록시 WS 핸드셰이크 시간 초과, 3장) 바로 1011로 닫는다. 끊김 복구처럼 `RECONNECT_DELAYS`로 다시 시도하게 한다. tornado는 `open()`이 끝날 때까지 `on_message`를 부르지 않으므로 메시지 보관은 필요 없다. 가짜 업스트림에서 첫 WS 연결만 실패시키는 테스트를 같이 만든다. `CONNECT_TIMEOUT`(15초)을 줄일지도 검토한다(핸드셰이크가 늦을 때 전체 대기가 길어진다)

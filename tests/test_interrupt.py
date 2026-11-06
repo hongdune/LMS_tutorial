@@ -83,6 +83,30 @@ def _kernel_alive(kernel_id) -> bool:
     return False
 
 
+def test_local_prints_connect_link_only_when_origin_is_given(tmp_path):
+    from urllib.parse import quote
+
+    for args, expect in ((["--origin", ORIGIN], True), ([], False)):
+        port = _free_port()
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "lms_kernel.launch", "--port", str(port), *args],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, start_new_session=True)
+        try:
+            lines = []
+            while not lines or "Ctrl+C" not in lines[-1]:
+                line = proc.stdout.readline()
+                assert line, "".join(lines)
+                lines.append(line)
+            token = [l for l in lines if l.startswith("  Token:")][0].split(":", 1)[1].strip()
+            link = (f"  {ORIGIN}/runtime/connect#url={quote(f'http://127.0.0.1:{port}', safe='')}"
+                    f"&token={token}\n")
+            assert (link in lines) is expect, "".join(lines)
+            assert any("runtime/connect" in l for l in lines) is expect
+        finally:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+
+
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
 def test_local_runtime_survives_one_ctrl_c_and_stops_on_two(tmp_path):
     port = _free_port()

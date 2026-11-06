@@ -55,3 +55,25 @@ def test_ctrl_c_is_left_to_lms_runtime_and_port_is_fixed():
     cmd = build_command("http://lms.example:3000", 8899, "t")
     assert "--LMSServerApp.ignore_sigint=True" in cmd
     assert "--ServerApp.port_retries=0" in cmd
+
+
+def test_connect_link_follows_contract_2_4():
+    from lms_kernel.launch import connect_link
+
+    assert connect_link("https://lms.test", "http://127.0.0.1:8888", "a-b_C9") == (
+        "https://lms.test/runtime/connect#url=http%3A%2F%2F127.0.0.1%3A8888&token=a-b_C9"
+    )
+    # A trailing slash on --origin does not double the path separator.
+    assert connect_link("https://lms.test/", "http://127.0.0.1:1", "t").startswith(
+        "https://lms.test/runtime/connect#")
+    assert connect_link("https://x", "http://127.0.0.1:1", "a/b+c d").endswith("token=a%2Fb%2Bc%20d")
+
+
+def test_registration_prints_link_only_with_origin(capsys):
+    from lms_kernel.launch import print_registration
+
+    print_registration(8888, "tok", None)
+    assert "runtime/connect" not in capsys.readouterr().out
+    print_registration(8888, "tok", "https://lms.test")
+    out = capsys.readouterr().out
+    assert "  https://lms.test/runtime/connect#url=http%3A%2F%2F127.0.0.1%3A8888&token=tok\n" in out

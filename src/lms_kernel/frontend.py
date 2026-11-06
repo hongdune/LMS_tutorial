@@ -31,7 +31,7 @@ from typing import Any, Optional
 
 from . import __version__
 
-CONTRACT_VERSION = "0.11"
+CONTRACT_VERSION = "0.12"
 SCHEMA_VERSION = 1
 
 MAX_VARIABLES = 200

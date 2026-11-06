@@ -165,7 +165,7 @@ def test_lms_runtime_info(runtime):
     r = requests.get(f"{base}/lms/runtime", headers={**_auth(), "Origin": ORIGIN}, timeout=5)
     assert r.status_code == 200
     assert r.headers.get("Access-Control-Allow-Origin") == ORIGIN
-    assert r.json() == {"version": 1, "kind": "local", "lms_runtime": "0.5.0", "contract": "0.11",
+    assert r.json() == {"version": 1, "kind": "local", "lms_runtime": "0.6.0", "contract": "0.12",
                         "colab": None}
     assert r.elapsed.total_seconds() < 1
 
